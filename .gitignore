@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Training data & output
+data/
+*.pt
+*.onnx
+*.traineddata
+*.lstmf
+*.box
+*.tif
+*.png
+!training_plot.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+*.csv
+
+# Non-code / academic writing
+paper/
+paper_revision/
