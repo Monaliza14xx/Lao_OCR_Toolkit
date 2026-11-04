@@ -14,6 +14,7 @@ from .utils import resolve_paths
 from .dataset import TesseractDataset, collate_fn
 from .model import build_model
 from .metrics import compute_metrics, compute_mean_rms, TrainingLogger
+from .report import render_progress, COER_KEYS
 from .command_utils import cmd_plot
 from .tesseract_transfer import (
     load_tesseract_pretrained_state_dict,
@@ -37,7 +38,7 @@ def cmd_training(args):
         sys.exit(1)
 
     print(f"\n{'=' * 70}")
-    print(f"  Tesseract PyTorch GPU Trainer")
+    print("  Tesseract PyTorch GPU Trainer")
     print(f"{'=' * 70}")
     print(f"  Device:          {device}" +
           (f" ({torch.cuda.get_device_name(0)})" if device.type == 'cuda' else ""))
@@ -61,7 +62,7 @@ def cmd_training(args):
     else:
         all_files = sorted(glob.glob(os.path.join(p.ground_truth_dir, '**', '*.lstmf'), recursive=True))
         if not all_files:
-            print(f"Error: No .lstmf files. Run 'lists' first or provide --ground_truth_dir")
+            print("Error: No .lstmf files. Run 'lists' first or provide --ground_truth_dir")
             sys.exit(1)
         random.seed(args.random_seed)
         random.shuffle(all_files)
@@ -203,7 +204,7 @@ def cmd_training(args):
         json.dump(vars(args), f, indent=2)
 
     print(f"{'=' * 70}")
-    print(f"  Training started...")
+    print("  Training started...")
     print(f"{'=' * 70}\n")
 
     iteration, epoch = start_iter, 0
@@ -242,19 +243,19 @@ def cmd_training(args):
                 avg_loss = run_loss / run_n
                 sps = (iteration - start_iter) * args.batch_size / elapsed
 
-                train_cer, train_wer, train_acc, _, train_samples = compute_metrics(
+                train_cer, train_wer, train_acc, train_coer, train_samples = compute_metrics(
                     model, [(imgs.cpu(), labels.cpu(), ilens, tlens)],
                     train_ds, device, max_batches=1, collect_samples=3)
 
-                eval_cer, eval_wer, eval_acc, eval_loss_val = None, None, None, None
+                eval_cer, eval_wer, eval_acc, eval_loss_val, eval_coer = None, None, None, None, None
                 if eval_loader and iteration % (args.debug_interval * 5) == 0:
-                    eval_cer, eval_wer, eval_acc, _, _ = compute_metrics(
+                    eval_cer, eval_wer, eval_acc, eval_coer, _ = compute_metrics(
                         model, eval_loader, train_ds, device)
                     # Compute eval loss
                     model.eval()
                     eval_losses = []
                     with torch.no_grad():
-                        for eb, (e_imgs, e_labels, e_ilens, e_tlens) in enumerate(eval_loader):
+                        for eb, (e_imgs, e_labels, _e_ilens, e_tlens) in enumerate(eval_loader):
                             if eb >= 50: break
                             e_imgs, e_labels = e_imgs.to(device), e_labels.to(device)
                             e_out = model(e_imgs)
@@ -271,28 +272,23 @@ def cmd_training(args):
 
                 mean_rms = compute_mean_rms(model)
                 gpu_mem = torch.cuda.memory_allocated() / 1e9 if device.type == 'cuda' else 0
+                gpu_peak = torch.cuda.max_memory_allocated() / 1e9 if gpu_mem else 0
 
-                print(f"\n{'─' * 70}")
-                print(f"  Iteration {iteration:6d}/{max_iter}  │  Epoch {epoch}  │  {sps:.0f} samples/sec")
-                print(f"  Loss={loss.item():.4f}  avg={avg_loss:.4f}  │  "
-                      f"CER={train_cer:.4f}  WER={train_wer:.4f}  Acc={train_acc:.2%}  │  "
-                      f"Mean RMS={mean_rms:.6f}")
-                if eval_cer is not None:
-                    print(f"  Eval — Loss={eval_loss_val:.4f}  CER={eval_cer:.4f}  WER={eval_wer:.4f}  "
-                          f"Acc={eval_acc:.2%}")
-                if gpu_mem:
-                    gpu_peak = torch.cuda.max_memory_allocated() / 1e9
-                    print(f"  GPU={gpu_mem:.2f}GB (peak={gpu_peak:.2f}GB)")
+                # Best checkpoint: by eval CER when validation exists, else by train CER
+                score = eval_cer if eval_loader else train_cer
+                is_best = score is not None and score < best_cer
 
-                if train_samples:
-                    print(f"  ┌─── Sample Predictions ───")
-                    for si, (gt_s, pred_s) in enumerate(train_samples):
-                        gt_display = gt_s[:80] + ('...' if len(gt_s) > 80 else '')
-                        pred_display = pred_s[:80] + ('...' if len(pred_s) > 80 else '')
-                        print(f"  │ [{si+1}] GT:   {gt_display}")
-                        print(f"  │     Pred: {pred_display}")
-                    print(f"  └────────────────────────")
-                print(f"{'─' * 70}")
+                coer, coer_source = (eval_coer, 'eval') if eval_coer is not None else (train_coer, 'train')
+                print(render_progress(
+                    iteration=iteration, max_iter=max_iter, epoch=epoch, sps=sps,
+                    elapsed=elapsed, iters_done=iteration - start_iter,
+                    loss=loss.item(), avg_loss=avg_loss,
+                    train={'cer': train_cer, 'wer': train_wer, 'acc': train_acc},
+                    evaluation=None if eval_cer is None else
+                        {'loss': eval_loss_val, 'cer': eval_cer, 'wer': eval_wer, 'acc': eval_acc},
+                    coer=coer, coer_source=coer_source, is_best=is_best,
+                    mean_rms=mean_rms, lr=optimizer.param_groups[0]['lr'],
+                    gpu_mem=gpu_mem, gpu_peak=gpu_peak, samples=train_samples))
 
                 logger.log(iteration=iteration, epoch=epoch,
                            train_loss=round(avg_loss, 6),
@@ -305,7 +301,9 @@ def cmd_training(args):
                            eval_acc=round(eval_acc, 6) if eval_acc is not None else '',
                            mean_rms=round(mean_rms, 6),
                            learning_rate=args.learning_rate,
-                           gpu_mem_gb=round(gpu_mem, 3), samples_per_sec=round(sps, 1))
+                           gpu_mem_gb=round(gpu_mem, 3), samples_per_sec=round(sps, 1),
+                           coer_source=coer_source,
+                           **{f'coer_{k}': round(coer[k], 6) for k in COER_KEYS if coer and k in coer})
 
                 # --- TensorBoard scalars ---
                 if tb_writer:
@@ -322,6 +320,9 @@ def cmd_training(args):
                         tb_writer.add_scalar('Eval/WER',      eval_wer,  iteration)
                     if eval_acc is not None:
                         tb_writer.add_scalar('Eval/Accuracy', eval_acc,  iteration)
+                    # Group: CoER (per Lao character class, eval set only)
+                    for k, v in (eval_coer or {}).items():
+                        tb_writer.add_scalar(f'CoER/{k}', v, iteration)
                     # Group: Model
                     tb_writer.add_scalar('Model/Mean_RMS',         mean_rms,           iteration)
                     # Group: System
@@ -332,17 +333,9 @@ def cmd_training(args):
 
                 run_loss, run_n = 0.0, 0
 
-                if eval_loader:
-                    # If validation is enabled, only update best_cer and save _best.pt when validation is run
-                    if eval_cer is not None:
-                        if eval_cer < best_cer:
-                            best_cer = eval_cer
-                            _save(model, optimizer, iteration, train_ds, args, p.model_output + '_best.pt')
-                else:
-                    # If validation is disabled, use train_cer
-                    if train_cer < best_cer:
-                        best_cer = train_cer
-                        _save(model, optimizer, iteration, train_ds, args, p.model_output + '_best.pt')
+                if is_best:
+                    best_cer = score
+                    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_best.pt')
 
                 cer_check = eval_cer if eval_cer is not None else train_cer
                 if cer_check <= args.target_error_rate:
@@ -358,7 +351,9 @@ def cmd_training(args):
     _save(model, optimizer, iteration, train_ds, args, p.model_output + '_final.pt')
     elapsed = time.time() - t0
     print(f"\n{'=' * 70}")
-    print(f"  ✓ Complete! {iteration} iters in {elapsed/60:.1f}m | Best CER: {best_cer:.6f}")
+    best = (f"Best CER: {best_cer:.6f}" if best_cer != float('inf') else
+            f"no evaluation ran (it runs every {args.debug_interval * 5} iterations), so no _best.pt")
+    print(f"  ✓ Complete! {iteration} iters in {elapsed/60:.1f}m | {best}")
     if device.type == 'cuda':
         print(f"  Peak GPU: {torch.cuda.max_memory_allocated()/1e9:.2f} GB")
     print(f"  Log: {p.log_file}")
@@ -368,5 +363,7 @@ def cmd_training(args):
         tb_writer.close()
         print(f"  TensorBoard logs: {tb_writer.log_dir}")
 
-    try: cmd_plot(args)
-    except: pass
+    try:
+        cmd_plot(args)
+    except Exception as e:   # plotting is a convenience; training already finished
+        print(f"  ⚠ Could not draw training plots: {e}")

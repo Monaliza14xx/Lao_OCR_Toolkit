@@ -26,19 +26,22 @@ Output (in data/cross_comparison/)
 
 Usage
 ─────
-  python compare_cross.py
-  python compare_cross.py --image_folder data/lao-ground-truth-test
-  python compare_cross.py --out_dir data/cross_comparison
+  python experiments/compare_cross.py
+  python experiments/compare_cross.py --image_folder data/lao-ground-truth-test
+  python experiments/compare_cross.py --out_dir data/cross_comparison
 
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: tesstrain_core, tesseract_tools
+
 import os
+import sys
 import csv
-import glob
 import time
 import argparse
 from collections import Counter, defaultdict
-from pathlib import Path
 
 # ── re-use all shared utilities from tesseract_tools.py ──────────────────────
 from tesseract_tools import (
@@ -47,6 +50,7 @@ from tesseract_tools import (
     align_strings,
     get_component_type,
     LAO_COMPONENT_MAP,
+    fold_sara_am,
     COER_COLS,
 )
 
@@ -111,6 +115,7 @@ def _run(image_path: str, model_name: str, tessdata_dir: str | None) -> str:
         text = pytesseract.image_to_string(img, config=config)
         return text.strip()
     except Exception as exc:
+        print(f"  ⚠ Tesseract failed on {image_path}: {exc}", file=sys.stderr)
         return ""
 
 
@@ -187,7 +192,8 @@ def compute_metrics(predictions: dict, test_pairs: list) -> dict:
         t0 = time.time()
 
         for img_path, truth in test_pairs:
-            pred = pred_map.get(img_path, "")
+            pred = fold_sara_am(pred_map.get(img_path, ""))
+            truth = fold_sara_am(truth)
 
             # CER
             d = edit_distance(pred, truth)

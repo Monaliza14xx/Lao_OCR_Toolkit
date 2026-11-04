@@ -96,7 +96,7 @@ def cmd_export(args):
             verified = True
         else:
             print(f"  ⚠ Numerical mismatch detected (max diff: {max_diff:.2e})")
-            print(f"    ONNX output may not match PyTorch — check results carefully.")
+            print("    ONNX output may not match PyTorch — check results carefully.")
     except ImportError:
         print("  ℹ onnxruntime not installed — skipping numerical verification")
         print("    Install with: pip install onnxruntime")

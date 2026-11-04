@@ -13,7 +13,7 @@ from matplotlib.patches import FancyBboxPatch
 
 from tesstrain_core.model import build_model
 from tesstrain_core.recognize import recognize_line
-from tesstrain_core.metrics import edit_distance, align_strings
+from tesstrain_core.metrics import align_strings
 
 def add_projection_profile_to_image(pil_img):
     """Augment image by adding its vertical projection profile underneath it."""

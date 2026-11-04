@@ -16,9 +16,13 @@ Output plots
 
 Usage
 ─────
-  python plot_training.py                   # auto-discover under data/
-  python plot_training.py --data_dir data   # explicit data root
+  python experiments/plot_training.py                   # auto-discover under data/
+  python experiments/plot_training.py --data_dir data   # explicit data root
 """
+
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: tesstrain_core, tesseract_tools
 
 import os
 import re

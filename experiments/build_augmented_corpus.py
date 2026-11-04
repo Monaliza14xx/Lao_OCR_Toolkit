@@ -8,7 +8,7 @@ and generates line-length-stratified corpus splits matching the real-world
 document distribution (68% body_long, 22% header_medium, 10% label_short).
 
 Usage:
-    python3 build_augmented_corpus.py \
+    python3 experiments/build_augmented_corpus.py \
         --real_gt /path/to/lao-real-documents \
         --base_corpus data/lao-corpus.txt \
         --output data/lao-corpus-augmented-v2.txt \
@@ -200,7 +200,7 @@ def main():
     real_type_counts = Counter(classify_line(t) for t in real_texts)
     real_total = len(real_texts)
     real_dist = {k: v / real_total for k, v in real_type_counts.items()}
-    print(f"\n  Real-world line-type distribution:")
+    print("\n  Real-world line-type distribution:")
     for t, f in sorted(real_dist.items()):
         print(f"    {t}: {f:.0%}")
 
@@ -213,7 +213,7 @@ def main():
     # Also save metadata
     meta_path = output_path.with_suffix(".meta.txt")
     meta_lines = [
-        f"# Enriched corpus metadata",
+        "# Enriched corpus metadata",
         f"# Source real-world GT: {args.real_gt}",
         f"# Base corpus: {args.base_corpus}",
         f"# Total lines: {len(enriched)}",
@@ -221,8 +221,8 @@ def main():
         f"# Base corpus lines: {len(base_lines)}",
         f"# Under-represented chars ({len(under)}): {''.join(sorted(under)) if under else 'none'}",
         f"# Oversample factor: {args.n_oversample}×",
-        f"#",
-        f"# Real-world line-type distribution (use with --preset real-match):",
+        "#",
+        "# Real-world line-type distribution (use with --preset real-match):",
     ]
     for t, f in sorted(real_dist.items()):
         meta_lines.append(f"#   {t}: {f:.1%}")
@@ -230,17 +230,17 @@ def main():
 
     print(f"\n  ✓ Enriched corpus: {output_path}")
     print(f"  ✓ Metadata:        {meta_path}")
-    print(f"\n  Usage:")
-    print(f"    python3 gen_data_from_text.py \\")
+    print("\n  Usage:")
+    print("    python3 gen_data_from_text.py \\")
     print(f"        --corpus {output_path} \\")
-    print(f"        --output_dir data/lao-augmented-v2 \\")
-    print(f"        --font tesstrain_core/font/Phetsarath-Regular.ttf \\")
-    print(f"               tesstrain_core/font/Phetsarath-Bold.ttf \\")
-    print(f"               tesstrain_core/font/phetsarath_ot.ttf \\")
-    print(f"        --font_size_min 28 --font_size_max 72 \\")
-    print(f"        --count 50000 \\")
-    print(f"        --preset real-match \\")
-    print(f"        --device cuda --batch_size 256 --ext jpg --to_lstmf")
+    print("        --output_dir data/lao-augmented-v2 \\")
+    print("        --font tesstrain_core/font/Phetsarath-Regular.ttf \\")
+    print("               tesstrain_core/font/Phetsarath-Bold.ttf \\")
+    print("               tesstrain_core/font/phetsarath_ot.ttf \\")
+    print("        --font_size_min 28 --font_size_max 72 \\")
+    print("        --count 50000 \\")
+    print("        --preset real-match \\")
+    print("        --device cuda --batch_size 256 --ext jpg --to_lstmf")
     print()
 
 

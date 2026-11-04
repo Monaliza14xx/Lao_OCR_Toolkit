@@ -46,10 +46,9 @@ import sys
 import time
 import unicodedata
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from PIL import features as _pil_features
 
 

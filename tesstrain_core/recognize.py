@@ -97,7 +97,7 @@ def page_segment_blocks(pil_img, min_block_height=20):
     for block_idx, (x1, x2) in enumerate(columns):
         col_img = pil_img.crop((x1, 0, x2, h))
         lines = page_segment_lines(col_img)
-        for line_idx, (line_img, y_off) in enumerate(lines):
+        for line_idx, (line_img, _y_off) in enumerate(lines):
             all_lines.append((line_img, block_idx, line_idx))
 
     return all_lines
@@ -179,7 +179,7 @@ def cmd_recognize(args):
         if dawg_decoder.word_dawg.word_count > 0 and lm:
             decode_method = f'beam+DAWG+LM ({dawg_decoder.word_dawg.word_count} words)'
         elif lm:
-            decode_method = f'beam+LM'
+            decode_method = 'beam+LM'
         elif dawg_decoder.word_dawg.word_count > 0:
             decode_method = f'beam+DAWG ({dawg_decoder.word_dawg.word_count} words)'
 
@@ -197,7 +197,7 @@ def cmd_recognize(args):
         lines = page_segment_lines(pil)
         print(f"  Lines found: {len(lines)}")
         print(f"  {'─' * 50}")
-        for i, (line_img, y_off) in enumerate(lines):
+        for _i, (line_img, _y_off) in enumerate(lines):
             text = recognize_line(model, line_img, target_h, device, inv_charset,
                                   beam_width, dawg_decoder)
             print(f"  {text}")
@@ -209,7 +209,7 @@ def cmd_recognize(args):
               f"Lines: {len(all_lines)}")
         print(f"  {'─' * 50}")
         current_block = -1
-        for line_img, block_idx, line_idx in all_lines:
+        for line_img, block_idx, _line_idx in all_lines:
             if block_idx != current_block:
                 if current_block >= 0:
                     print()
@@ -221,6 +221,6 @@ def cmd_recognize(args):
 
     else:
         print(f"  Unsupported PSM mode: {psm}")
-        print(f"  Supported: 3 (full auto), 6 (single block), 7 (single line), 13 (raw line)")
+        print("  Supported: 3 (full auto), 6 (single block), 7 (single line), 13 (raw line)")
 
     print()

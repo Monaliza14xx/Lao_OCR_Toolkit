@@ -2,9 +2,7 @@ import os
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator, AutoMinorLocator
-from matplotlib.lines import Line2D
-import numpy as np
+from matplotlib.ticker import MaxNLocator
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PAPER-READY THEME CONFIG
@@ -171,8 +169,7 @@ class DashboardPlotter:
     def generate_dashboard(self, entries, epoch_boundaries=None):
         """Generate the unified 6-panel dashboard."""
         fig, axes = plt.subplots(3, 2, figsize=(18, 16))
-        title_name = self.model_name if self.model_name.startswith("LaoCRNN-") else f"LaoCRNN-{self.model_name}"
-        fig.suptitle(f'{title_name} — Training Dashboard',
+        fig.suptitle(f'{self.model_name} — Training Dashboard',
                      fontsize=20, fontweight='bold', color=TB_TEXT, y=0.98)
         apply_premium_theme(fig, axes.flatten())
 
@@ -245,7 +242,7 @@ class DashboardPlotter:
         # Handle epoch boundaries
         if epoch_boundaries:
             for ax in axes.flatten():
-                for it, ep in epoch_boundaries:
+                for it, _ep in epoch_boundaries:
                     ax.axvline(x=it, color='#aaaaaa', linestyle=':', alpha=0.4, lw=0.8)
 
         # Cleanup

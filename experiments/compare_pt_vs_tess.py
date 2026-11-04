@@ -7,18 +7,18 @@ Useful for validating the export process and benchmarking GPU vs CPU inference.
 
 Usage
 ─────
-  python compare_pt_vs_tess.py
-  python compare_pt_vs_tess.py --image_folder data/lao-ground-truth-test
+  python experiments/compare_pt_vs_tess.py
+  python experiments/compare_pt_vs_tess.py --image_folder data/lao-ground-truth-test
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: tesstrain_core, tesseract_tools
+
 import os
-import csv
 import glob
-import time
 import argparse
 import re
-from collections import Counter, defaultdict
-from pathlib import Path
 
 import torch
 from PIL import Image as _PILImage
@@ -26,11 +26,6 @@ from PIL import Image as _PILImage
 # ── Project imports ──────────────────────────────────────────────────────────
 from tesseract_tools import (
     find_test_pairs,
-    edit_distance,
-    align_strings,
-    get_component_type,
-    LAO_COMPONENT_MAP,
-    COER_COLS,
 )
 from tesstrain_core.model import build_model
 from tesstrain_core.recognize import recognize_line

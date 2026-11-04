@@ -5,7 +5,6 @@ from collections import Counter
 import torch
 import numpy as np
 from PIL import Image, ImageDraw
-from tesstrain_core.utils import resolve_paths
 from tesstrain_core.model import build_model
 from tesstrain_core.recognize import recognize_line
 from tesstrain_core.metrics import TrainingLogger, edit_distance, align_strings, get_component_type, LAO_COMPONENT_MAP, compute_component_metrics
@@ -15,7 +14,7 @@ try:
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import MaxNLocator
+    from matplotlib.ticker import MaxNLocator  # noqa: F401
 except ImportError:
     pass
 
@@ -212,8 +211,8 @@ def cmd_compare(args):
                     if 0 <= diff < 7200:
                         total_s += diff
                 train_time = total_s
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  ⚠ Could not read training time: {e}")
                 
         model_metrics[model_name] = {
             'checkpoint_type': 'best' if used_best else ('final' if os.path.exists(ckpt_path_final) else 'none'),
@@ -558,8 +557,8 @@ def cmd_compare(args):
                     
                     coer_results = {}
                     for cat, s in coer_stats.items():
-                         if s['total'] > 0 or s['errors'] > 0:
-                             coer_results[cat] = s['errors'] / max(s['total'], 1)
+                         if s['total'] > 0:
+                             coer_results[cat] = s['errors'] / s['total']
                               
                     avg_coer = sum(coer_results.values()) / max(len(coer_results), 1) if coer_results else 0.0
                     acc = max(0.0, 1.0 - ((avg_cer + wer + avg_coer) / 3.0))
@@ -653,8 +652,8 @@ def cmd_compare(args):
                 
                 coer_results = {}
                 for cat, s in coer_stats.items():
-                     if s['total'] > 0 or s['errors'] > 0:
-                         coer_results[cat] = s['errors'] / max(s['total'], 1)
+                     if s['total'] > 0:
+                         coer_results[cat] = s['errors'] / s['total']
                           
                 avg_coer = sum(coer_results.values()) / max(len(coer_results), 1) if coer_results else 0.0
                 acc = max(0.0, 1.0 - ((avg_cer + wer + avg_coer) / 3.0))
@@ -674,8 +673,8 @@ def cmd_compare(args):
                                 if 0 <= diff < 7200:
                                     total_s += diff
                             train_time = total_s
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"  ⚠ Could not read training time: {e}")
                           
                 eval_results[model_name] = {
                     'cer': avg_cer,
@@ -842,7 +841,8 @@ def cmd_compare(args):
         # Print CoER
         coer_cols = [('tone', 'Tone Mark'), ('upper_vowel', 'Upper Vowel'), ('consonant', 'Consonant'),
                      ('before_vowel', 'Before Vowel'), ('rear_vowel', 'After Vowel'), ('lower_vowel', 'Lower Vowel'),
-                     ('symbol', 'Symbol'), ('digit', 'Digit'), ('lao_number', 'Lao Number'), ('special', 'Special')]
+                     ('special', 'Special'), ('lao_number', 'Lao Number'), ('digit', 'Digit'), ('latin', 'Latin'),
+                     ('space', 'Space'), ('symbol', 'Symbol')]
                      
         if results is not None:
             print(f"\n  ==== Component-Level Error Rate (CoER) - Custom Test Set ({custom_dir}) ====")
@@ -1576,6 +1576,7 @@ def cmd_compare(args):
                     'upper_vowel':  '#ff7f0e', 'lower_vowel': '#8c564b',
                     'symbol':       '#7f7f7f', 'lao_number':  '#17becf',
                     'digit':        '#bcbd22', 'special':     '#e377c2',
+                    'latin':        '#393b79', 'space':       '#c7c7c7',
                     'other':        '#aaaaaa',
                 }
 

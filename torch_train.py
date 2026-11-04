@@ -254,6 +254,8 @@ Get help for a subcommand:
     p.add_argument('--seed', type=int, default=42, help='RNG seed — same seed = same samples across all pairs (default: 42)')
     p.add_argument('--base_data_dir', default='data', metavar='DIR', help='Base data directory containing model folders (default: data)')
     p.add_argument('--val_list', default='', metavar='FILE', help='Path to the validation split file (e.g. data/lao/lists.val)')
+    p.add_argument('--pairs', nargs='+', default=None, metavar='A:B',
+                   help='Model pairs to compare, e.g. lao-small:lao-large (default: the 7 ablation pairs of the original experiments)')
 
     # wer-distribution
     p = sub.add_parser('wer-distribution', help='Analyse WER distribution grouped by GT word count')

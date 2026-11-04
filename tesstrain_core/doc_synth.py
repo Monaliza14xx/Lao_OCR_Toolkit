@@ -18,10 +18,9 @@ JPEG compression, red stamp ≈ 7 % and blue pen ≈ 2.5 % of the ink.
 import io
 import math
 import os
-import random
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 
 from gen_data_from_text import (_HAS_RAQM, _load_font, _script_runs, _split_grapheme_clusters,
                                 font_covers, font_shapes_correctly, normalize_lao_text)
@@ -279,7 +278,7 @@ class Page:
         r = size / 2
         cy = top + r
         d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=(g, g, g), width=max(3, int(size / 40)))
-        for k in range(rng.randint(20, 40)):          # rays / texture
+        for _k in range(rng.randint(20, 40)):          # rays / texture
             a = rng.uniform(0, 2 * math.pi)
             rr = rng.uniform(0.2, 0.95) * r
             d.line((cx, cy, cx + rr * math.cos(a), cy + rr * math.sin(a)), fill=(g, g, g),
@@ -364,7 +363,6 @@ def make_letter(content, fonts, rng, dpi=300):
     right = page.W - rng.uniform(1.5, 2.5) * cm
     bottom = page.H - rng.uniform(1.5, 2.5) * cm
     y = rng.uniform(1.0, 2.0) * cm
-    asc = lambda s: _load_font(s.lao, s.size, _HAS_RAQM).getmetrics()[0]
 
     def newline(s, k=1.0):
         nonlocal y

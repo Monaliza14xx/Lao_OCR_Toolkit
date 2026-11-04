@@ -13,9 +13,9 @@ import subprocess
 def check_dependencies():
     print("Checking dependencies...")
     try:
-        import pytesseract
-        import torch
-        import PIL
+        import pytesseract  # noqa: F401  (dependency check)
+        import torch  # noqa: F401
+        import PIL  # noqa: F401
         print("  [OK] All Python dependencies found.")
     except ImportError as e:
         print(f"  [ERROR] Missing dependency: {e}")
@@ -28,7 +28,7 @@ def check_files():
     test_dir = "data/lao-ground-truth-test"
     if not os.path.exists(test_dir):
         print(f"  [WARNING] Directory '{test_dir}' not found.")
-        print(f"  Creating it now... please add your *.png and *.gt.txt files there.")
+        print("  Creating it now... please add your *.png and *.gt.txt files there.")
         os.makedirs(test_dir, exist_ok=True)
     else:
         files = os.listdir(test_dir)
@@ -46,7 +46,7 @@ def run():
     
     check_files()
     
-    print("\nStarting Benchmark: python3 compare_pt_vs_tess.py")
+    print("\nStarting Benchmark: python3 experiments/compare_pt_vs_tess.py")
     print("-" * 50)
     
     try:

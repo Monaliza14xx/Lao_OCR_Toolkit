@@ -18,5 +18,7 @@ __all__ = [
     'cmd_recognize',
     'cmd_inspection',
     'cmd_compare_inspection',
+    'cmd_wer_distribution',
+    'cmd_confusion_matrix',
     'cmd_projection',
 ]

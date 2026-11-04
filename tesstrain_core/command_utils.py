@@ -57,12 +57,12 @@ def cmd_charset_stats(args):
         categories[cat] += char_counter[ch]
 
     # Print header
-    print(f"\n  ╔══════════════════════════════════════════════════════════════════════╗")
+    print("\n  ╔══════════════════════════════════════════════════════════════════════╗")
     print(f"  ║  Character Analytics — {gt_dir}")
-    print(f"  ╠══════════════════════════════════════════════════════════════════════╣")
+    print("  ╠══════════════════════════════════════════════════════════════════════╣")
     print(f"  ║  Files: {total_files:,}    Lines: {total_lines:,}    "
           f"Total chars: {total_chars:,}    Unique: {unique_chars}")
-    print(f"  ╚══════════════════════════════════════════════════════════════════════╝\n")
+    print("  ╚══════════════════════════════════════════════════════════════════════╝\n")
 
     # Print table header
     print(f"  {'#':>5}  {'Char':>6}  {'Unicode':>10}  {'Count':>10}  {'%':>7}  {'Category':<20}  Name")
@@ -121,7 +121,7 @@ def cmd_charset_stats(args):
         print(f"  {rank:>5}  {display:>6}  {codepoint:>10}  {count:>10,}  {pct:>6.2f}%  {cat_desc:<20}  {name}")
 
     # Category summary
-    print(f"\n  ── Category Summary ──────────────────────────────")
+    print("\n  ── Category Summary ──────────────────────────────")
     cat_sorted = sorted(categories.items(), key=lambda x: -x[1])
     for cat, count in cat_sorted:
         pct = count / total_chars * 100
@@ -172,12 +172,12 @@ def cmd_unicharset(args):
     tool = shutil.which('unicharset_extractor')
     if tool and len(gt_files) < 500:
         cmd = [tool, '--output_unicharset', p.unicharset_file, '--norm_mode', '1'] + gt_files
-        print(f"  Running unicharset_extractor...")
+        print("  Running unicharset_extractor...")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             print(f"  ✓ Unicharset: {p.unicharset_file}")
             return
-        print(f"  Warning: unicharset_extractor failed, using Python fallback")
+        print("  Warning: unicharset_extractor failed, using Python fallback")
     elif tool and len(gt_files) >= 500:
         import tempfile
         with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as tmp:
@@ -194,16 +194,16 @@ def cmd_unicharset(args):
         except Exception:
             pass
         try: os.unlink(tmp_path)
-        except: pass
-        print(f"  Warning: unicharset_extractor failed, using Python fallback")
+        except OSError: pass   # temp file already gone
+        print("  Warning: unicharset_extractor failed, using Python fallback")
 
     all_chars = set()
     for gt_file in gt_files:
         try:
             with open(gt_file, 'r', encoding='utf-8') as f:
                 all_chars.update(f.read().strip())
-        except Exception:
-            pass
+        except (OSError, UnicodeDecodeError) as e:
+            print(f"  ⚠ Skipping {gt_file}: {e}")
 
     all_chars.discard('\n')
     all_chars.discard('\r')
@@ -324,7 +324,7 @@ def cmd_proto_model(args):
         if os.path.exists(p.punc_file):
             cmd += ['--puncs', p.punc_file]
 
-        print(f"  Running combine_lang_model...")
+        print("  Running combine_lang_model...")
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             expected = os.path.join(p.output_dir, f'{args.model_name}.traineddata')
@@ -332,7 +332,7 @@ def cmd_proto_model(args):
                 print(f"  ✓ Proto model: {expected}")
                 return
         print(f"  Warning: combine_lang_model failed: {result.stderr}")
-        print(f"  Continuing without proto model (pure PyTorch training still works)")
+        print("  Continuing without proto model (pure PyTorch training still works)")
     else:
         print("  combine_lang_model not found. Proto model is optional for PyTorch training.")
         print("  Install tesseract-ocr-training-tools to enable it.")

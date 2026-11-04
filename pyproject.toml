@@ -1,0 +1,21 @@
+[project]
+name = "lao-ocr-toolkit"
+version = "0.1.0"
+description = "GPU training, evaluation and synthetic data for Lao OCR (Tesseract-compatible VGSL models in PyTorch)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["data", "paper", "paper_revision", "fonts", "scratch_*.py"]
+
+[tool.ruff.lint]
+# Errors that break or silently corrupt a run: undefined names, unused
+# imports/variables, bare except, syntax errors.
+select = ["F", "E9", "E722"]

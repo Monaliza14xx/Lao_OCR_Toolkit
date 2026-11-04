@@ -4,22 +4,9 @@ import random
 import math
 from datetime import datetime
 import torch
-from collections import Counter
 
-# Lao character components for granular error analysis
-LAO_COMPONENT_MAP = {
-    'tone': ['່', '້', '໊', '໋'],
-    'consonant': ['ກ', 'ຂ', 'ຄ', 'ງ', 'ຈ', 'ຊ', 'ຍ', 'ດ', 'ຕ', 'ຖ', 'ທ', 'ນ', 'ບ', 'ປ',
-                  'ຜ', 'ຝ', 'ພ', 'ຟ', 'ມ', 'ຢ', 'ຣ', 'ລ', 'ວ', 'ສ', 'ຫ', 'ອ', 'ຮ', 'ໜ', 'ໝ', 'ຽ','ໆ','ຯ'],
-    'lao_number': ['໐', '໑', '໒', '໓', '໔', '໕', '໖', '໗', '໘', '໙'],
-    'digit': ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'],
-    'symbol': ['.', ',', '?', '/', '!', ':', ';', '-', ' ', '+', '*', '=', '(', ')', '[', ']', '{', '}', '"', "'", '@', '#', '$', '%', '^', '&', '_', '|', '\\', '<', '>', '«', '»', '—', '…', '“', '”', '‘', '’', '•', '·', '°', '±', '×', '÷', '₭', '¥', '€', '£', '$'],
-    'before_vowel': ['ແ', 'ໂ', 'ເ', 'ໄ', 'ໃ'],
-    'rear_vowel': ['ະ', 'າ', 'ຳ'],
-    'upper_vowel': ['ັ', 'ິ', 'ີ', 'ົ', 'ຶ', 'ື', '໌', 'ໍ'],
-    'lower_vowel': ['ຸ', 'ູ'],
-    'special': ['ຼ']
-}
+# Lao character classes for CoER live in lao_classes.py (shared with the standalone scripts)
+from .lao_classes import LAO_COMPONENT_MAP, LAO_CLASSES, get_component_type, fold_sara_am  # noqa: F401
 
 import unicodedata
 
@@ -28,6 +15,7 @@ def normalize_lao_text(text):
     if not text: return ""
     # Standard Unicode Normalization
     text = unicodedata.normalize('NFC', text)
+    text = fold_sara_am(text)   # ໍ + າ → ຳ (same glyphs, standard spelling)
     # Strip invisible characters
     for s in ['\u200b', '\u200c', '\u200d', '\ufeff']:
         text = text.replace(s, '')
@@ -49,11 +37,6 @@ def normalize_lao_text(text):
     
     return text
 
-def get_component_type(ch):
-    for name, chars in LAO_COMPONENT_MAP.items():
-        if ch in chars:
-            return name
-    return 'other'
 
 LAO_SIMILAR_PAIRS = [
     ('ໃ', 'ໄ'), # Vowels (mai muan vs mai may)
@@ -229,7 +212,7 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
     all_pairs = []
     batches = 0
     with torch.no_grad():
-        for imgs, labels, ilens, tlens in loader:
+        for imgs, labels, _ilens, tlens in loader:
             if batches >= max_batches: break
             imgs = imgs.to(device)
             out = model(imgs)
@@ -273,8 +256,8 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
     # Calculate CoER results
     coer_results = {}
     for cat, s in coer_stats.items():
-        if s['total'] > 0 or s['errors'] > 0:
-            coer_results[cat] = s['errors'] / max(s['total'], 1)
+        if s['total'] > 0:   # undefined for a class absent from the ground truth
+            coer_results[cat] = s['errors'] / s['total']
             
     samples = []
     if collect_samples > 0 and all_pairs:
@@ -295,7 +278,8 @@ class TrainingLogger:
     HEADER = ['iteration', 'timestamp', 'epoch', 'train_loss', 'eval_loss',
               'train_cer', 'train_wer', 'train_acc',
               'eval_cer', 'eval_wer', 'eval_acc',
-              'mean_rms', 'learning_rate', 'gpu_mem_gb', 'samples_per_sec']
+              'mean_rms', 'learning_rate', 'gpu_mem_gb', 'samples_per_sec',
+              'coer_source'] + [f'coer_{k}' for k in list(LAO_COMPONENT_MAP) + ['other']]
 
     def __init__(self, log_file):
         self.log_file = log_file

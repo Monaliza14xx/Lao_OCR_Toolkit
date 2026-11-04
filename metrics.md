@@ -45,6 +45,29 @@ $$CoER_c = \frac{S_c + D_c + I_c}{N_c}$$
 
 > **Important**: Because insertions increase the error numerator but do not increase the ground truth denominator ($N_c$), it is mathematically possible for a category's CoER to exceed 1.0 (100%) if the model frequently hallucinates characters in that category.
 
+> A category with no characters in the ground truth ($N_c = 0$) has no CoER; it is left out of the results.
+>
+> The Tesseract-side scripts (`tesseract_tools.py`, `compare_cross.py`) count only substitutions and deletions ($I_c$ is not added), so their CoER is never above 100% and is not directly comparable with the PyTorch-side numbers.
+
+**Character classes** follow the 5 tiers Lao stacks in (defined once in `tesstrain_core/lao_classes.py`, used by every script):
+
+| Tier | Class | Characters |
+|------|-------|-----------|
+| 1 | `tone` | ່ ້ ໊ ໋ |
+| 2 | `upper_vowel` | ັ ິ ີ ຶ ື ົ ໍ, ໌ (cancellation mark) |
+| 3 | `consonant` | the 27 consonants (ກ–ຮ) plus ໜ ໝ and ຽ |
+| 3 | `before_vowel` | ເ ແ ໂ ໃ ໄ |
+| 3 | `rear_vowel` | ະ າ ຳ |
+| 4 | `special` | ຼ (subscript ລ) |
+| 5 | `lower_vowel` | ຸ ູ |
+| – | `lao_number` / `digit` | ໐–໙ / 0–9 |
+| – | `latin` | A–Z a–z |
+| – | `space` | the space character |
+| – | `symbol` | punctuation and signs, incl. ໆ and ຯ |
+| – | `other` | anything else, including the Pali / Sanskrit / Khmu letters and marks (ຆ ຉ ຌ ຎ–ຓ ຘ ຠ ຨ ຩ ຬ ໞ ໟ ຺ ໎), which modern official Lao doesn't use |
+
+Before scoring, ໍ + າ is folded into ຳ (with a tone mark between them moved in front): the two spellings look identical, so the difference isn't counted as an error.
+
 ## 4. ACC (Sequence / Line Accuracy)
 ACC is a strict, binary metric that measures the percentage of entire image sequences (sentences or text lines) that were predicted perfectly.
 

@@ -142,7 +142,7 @@ def export_model(log_path, out_dir):
             eval_count += 1
         print(f"    → {eval_count} eval checkpoints written")
     else:
-        print(f"    → No eval/ directory found, skipping eval metrics")
+        print("    → No eval/ directory found, skipping eval metrics")
 
     writer.close()
     print(f"    → Events saved to: {tb_dir}")

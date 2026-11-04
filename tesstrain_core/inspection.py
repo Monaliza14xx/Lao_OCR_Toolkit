@@ -1,8 +1,8 @@
 import os
+import sys
 import glob
 import random
 import torch
-import torch.nn as nn
 import numpy as np
 from PIL import Image
 from argparse import Namespace
@@ -10,9 +10,7 @@ from argparse import Namespace
 from tesstrain_core.utils import resolve_paths
 from tesstrain_core.dataset import TesseractDataset
 from tesstrain_core.model import (
-    build_model, CollapseH, FwdLSTM, RevLSTM, BiLSTM, SumLSTM,
-    AttentionCollapseY, MultiHeadAttentionCollapseY, HorizontalSelfAttention,
-    HybridCollapseY, MonotonicConformerBlock,
+    build_model, AttentionCollapseY, MultiHeadAttentionCollapseY,
 )
 
 try:
@@ -307,7 +305,7 @@ def cmd_inspection(args: Namespace):
         files = sorted(glob.glob(os.path.join(p.ground_truth_dir, '**', '*.lstmf'), recursive=True))
         
     if not files:
-        print(f"  ERROR: No .lstmf files found to inspect.")
+        print("  ERROR: No .lstmf files found to inspect.")
         return
         
     num_samples = getattr(args, 'num_samples', 10)
@@ -416,7 +414,7 @@ def cmd_inspection(args: Namespace):
             elif x.dim() == 3:
                 # LSTM / Linear / Attention-collapse output: (1, W, C)
                 features = x[0].transpose(0, 1) # (C, W)
-                save_path = os.path.join(layer_dir, f"features.png")
+                save_path = os.path.join(layer_dir, "features.png")
                 _normalize_and_save(features, save_path, is_heatmap=True)
 
                 # ── Attention heatmap export ──────────────────────────────────
@@ -557,7 +555,6 @@ def _highlight_errors(pred: str, gt: str) -> str:
     """Return a string where wrong chars are marked with [X]."""
     # Simple character-level diff using edit alignment
     result = []
-    pi, gi = 0, 0
     # Cheap alignment: pad shorter string
     for p_ch, g_ch in zip(pred.ljust(max(len(pred), len(gt))),
                            gt.ljust(max(len(pred), len(gt)))):
@@ -580,11 +577,9 @@ def cmd_compare_inspection(args):
         │ [img 2] │ ...     │ ...     │ [img 2] │ ...     │ ...     │
         └─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘
 
-    4 comparison pairs (hardcoded):
-        1. Compare filter            : LaoCRNN-I48K3C16 vs LaoCRNN-I48K3C32
-        2. Compare kernel            : LaoCRNN-I48K3C16 vs LaoCRNN-I48K5C16
-        3. Compare resolution+kernel : LaoCRNN-I48K3C16 vs LaoCRNN-I64K5C16
-        4. Compare res+kernel+filter : LaoCRNN-I48K3C16 vs LaoCRNN-I64K5C32
+    Pairs come from --pairs MODEL_A:MODEL_B ... . Without --pairs, the 7 ablation
+    pairs of the original experiments are used (baseline LaoCRNN-I48K3C16 against
+    wider filters, larger kernels and 64 px input).
     """
     print("=" * 70)
     print("  Cross-Model Inspection: Ablation Comparison Grids")
@@ -594,23 +589,9 @@ def cmd_compare_inspection(args):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
-    import matplotlib.font_manager as fm
-    from matplotlib.colors import LinearSegmentedColormap
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"  Device: {device}")
-
-    # ── Lao font ──────────────────────────────────────────────────────────────
-    for _fp in [
-        os.path.join(os.path.dirname(__file__), '..', 'font', 'phetsarath_ot.ttf'),
-        os.path.join(os.path.dirname(__file__), 'font', 'phetsarath_ot.ttf'),
-        'font/phetsarath_ot.ttf',
-    ]:
-        if os.path.exists(_fp):
-            lao_font = fm.FontProperties(fname=_fp, size=8)
-            break
-    else:
-        lao_font = None
 
     # ── Config ────────────────────────────────────────────────────────────────
     base_dir = getattr(args, 'base_data_dir', 'data')
@@ -620,8 +601,8 @@ def cmd_compare_inspection(args):
     min_len  = getattr(args, 'min_length', 3)
     os.makedirs(out_dir, exist_ok=True)
 
-    # Baseline: LaoCRNN-I48K3C16  (48px / 3×3 / 16ch)
-    # All 7 ablation pairs vs the baseline
+    # Default: the 7 ablation pairs of the original experiments, all against the
+    # baseline LaoCRNN-I48K3C16 (48px / 3×3 / 16ch). --pairs replaces them.
     ABLATION_PAIRS = [
         # 1. Filter width: same res + kernel, double filters
         ('compare_filter',
@@ -665,6 +646,14 @@ def cmd_compare_inspection(args):
          'LaoCRNN-I48K3C16', 'LaoCRNN-I64K5C32',
          'I48 / 3×3 / 16ch  (baseline)', 'I64 / 5×5 / 32ch'),
     ]
+    user_pairs = getattr(args, 'pairs', None)
+    if user_pairs:
+        ABLATION_PAIRS = []
+        for spec in user_pairs:
+            if ':' not in spec:
+                sys.exit(f"Error: --pairs expects MODEL_A:MODEL_B, got '{spec}'")
+            a, b = spec.split(':', 1)
+            ABLATION_PAIRS.append((f'compare_{a}_vs_{b}', f'{a}  vs  {b}', a, b, a, b))
 
 
     # ── Shared sample selection ────────────────────────────────────────────────
@@ -722,11 +711,8 @@ def cmd_compare_inspection(args):
     cmap_tanh = 'gray'
 
     # ── Style constants ───────────────────────────────────────────────────────
-    BG_COLOR   = '#f5f5f5'
     HDR_A      = '#1565C0'   # dark blue for model A header
     HDR_B      = '#7B1FA2'   # purple for model B header
-    DIVIDER_C  = '#B0BEC5'
-    TITLE_C    = '#1a1d2e'
 
 
 
@@ -784,7 +770,6 @@ def cmd_compare_inspection(args):
 
         for s in range(N):
             img_tensor, _, _, _ = dataset[s]
-            gt   = dataset.samples[s][1]
             stem = os.path.splitext(os.path.basename(shared_files[s]))[0]
             x    = img_tensor.unsqueeze(0).to(device)
             inp  = _to_display(img_tensor)   # uint8 (H, W)
@@ -960,7 +945,6 @@ def cmd_wer_distribution(args):
     print("  WER Distribution Analysis — by GT Word Count")
     print("=" * 70)
 
-    import re
     import csv as csv_mod
     import matplotlib
     matplotlib.use('Agg')
@@ -1228,7 +1212,7 @@ def cmd_wer_distribution(args):
         g = min(1.0, 2 * (1 - nv))
         colors.append((r, g, 0.3, 0.85))
 
-    bars = ax2.bar(x_pos, mean_vals, color=colors, edgecolor='#555555',
+    ax2.bar(x_pos, mean_vals, color=colors, edgecolor='#555555',
                    linewidth=0.8, zorder=2)
     ax2.errorbar(x_pos, mean_vals, yerr=std_vals, fmt='none',
                  ecolor='#333333', capsize=4, capthick=1.2, linewidth=1.2,
@@ -1320,7 +1304,6 @@ def cmd_confusion_matrix(args):
     print("  Confusion Matrix — Per-Character Error Analysis")
     print("=" * 70)
 
-    import re
     import csv as csv_mod
     import matplotlib
     matplotlib.use('Agg')
@@ -1332,7 +1315,7 @@ def cmd_confusion_matrix(args):
     from tesstrain_core.dataset import TesseractDataset
     from tesstrain_core.model import build_model
     from tesstrain_core.metrics import (
-        edit_distance, normalize_lao_text, align_strings,
+        normalize_lao_text, align_strings,
         get_component_type, LAO_COMPONENT_MAP,
     )
 
@@ -1478,7 +1461,7 @@ def cmd_confusion_matrix(args):
         comp_stats[cat]['errors'] += st['sub'] + st['del']
 
     # ── Console summary ──────────────────────────────────────────────────────
-    print(f"\n  Component Error Rate (CoER):")
+    print("\n  Component Error Rate (CoER):")
     print(f"  {'Component':<15} {'Total':>7} {'Errors':>7} {'Rate':>8}")
     print("  " + "─" * 42)
     for cat in sorted(comp_stats, key=lambda c: comp_stats[c]['errors'] / max(comp_stats[c]['total'], 1), reverse=True):
@@ -1486,7 +1469,7 @@ def cmd_confusion_matrix(args):
         rate = cs['errors'] / max(cs['total'], 1) * 100
         print(f"  {cat:<15} {cs['total']:>7} {cs['errors']:>7} {rate:>7.2f}%")
 
-    print(f"\n  Top-20 confused characters:")
+    print("\n  Top-20 confused characters:")
     print(f"  {'Char':<6} {'Category':<15} {'Total':>6} {'Err':>5} {'Rate':>7} {'Top confusion':>20}")
     print("  " + "─" * 65)
     sorted_chars = sorted(
@@ -1553,7 +1536,7 @@ def cmd_confusion_matrix(args):
     fig, ax = plt.subplots(figsize=(10, max(4, len(cats_sorted) * 0.5)), facecolor='#ffffff')
     y_pos = np.arange(len(cats_sorted))
     colors_coer = ['#EF5350' if r > 20 else '#FFA726' if r > 10 else '#66BB6A' for r in cat_rates]
-    bars = ax.barh(y_pos, cat_rates, color=colors_coer, edgecolor='#555', linewidth=0.6)
+    ax.barh(y_pos, cat_rates, color=colors_coer, edgecolor='#555', linewidth=0.6)
     for yi, (rate, total) in enumerate(zip(cat_rates, cat_totals)):
         ax.text(rate + 0.5, yi, f'{rate:.1f}% (n={total})', va='center', fontsize=8, color='#333')
     ax.set_yticks(y_pos)
@@ -1573,11 +1556,12 @@ def cmd_confusion_matrix(args):
     # Show characters with total >= 5, grouped by component
     COMP_ORDER = ['tone', 'upper_vowel', 'lower_vowel', 'before_vowel',
                   'rear_vowel', 'consonant', 'special', 'lao_number',
-                  'digit', 'symbol', 'other']
+                  'digit', 'latin', 'space', 'symbol', 'other']
     COMP_COLORS = {
         'tone': '#E53935', 'upper_vowel': '#8E24AA', 'lower_vowel': '#5E35B1',
         'before_vowel': '#1E88E5', 'rear_vowel': '#00ACC1', 'consonant': '#43A047',
         'special': '#F4511E', 'lao_number': '#FB8C00', 'digit': '#6D4C41',
+        'latin': '#3949AB', 'space': '#BDBDBD',
         'symbol': '#757575', 'other': '#9E9E9E',
     }
 
@@ -1632,7 +1616,8 @@ def cmd_confusion_matrix(args):
         'upper_vowel': 'Upper Vowel', 'lower_vowel': 'Lower Vowel',
         'before_vowel': 'Before Vowel', 'rear_vowel': 'Rear Vowel',
         'special': 'Special', 'lao_number': 'Lao Number',
-        'digit': 'Digit', 'symbol': 'Symbol', 'other': 'Other',
+        'digit': 'Digit', 'latin': 'Latin', 'space': 'Space',
+        'symbol': 'Symbol', 'other': 'Other',
     }
 
     for cat, cat_chars in LAO_COMPONENT_MAP.items():

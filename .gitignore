@@ -56,3 +56,6 @@ scratch_*.py
 
 # Proprietary fonts (not redistributable) — supply your own via --sec_font
 tesstrain_core/font/TimesNewRoman*.ttf
+
+# Thesis write-up (kept local, not published)
+THESIS_REPORT.md

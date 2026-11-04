@@ -65,7 +65,7 @@ def cmd_evaluation(args):
         if inferred is None:
             print(f"  ERROR: Cannot infer architecture from {pt_path}. Re-run training.")
             sys.exit(1)
-        print(f"  WARNING: Stored net_spec was incorrect.")
+        print("  WARNING: Stored net_spec was incorrect.")
         print(f"    Stored:   {stored_spec}")
         print(f"    Inferred: {inferred}")
         model = build_model(inferred, num_classes).to(device)
@@ -104,7 +104,7 @@ def cmd_evaluation(args):
     print(f"  Accuracy:   {acc:.6f} ({acc*100:.2f}%)")
     
     if coer:
-        print(f"\n  Component Error Rates (CoER):")
+        print("\n  Component Error Rates (CoER):")
         # Sort by error rate descending to show worst parts first
         sorted_coer = sorted(coer.items(), key=lambda x: x[1], reverse=True)
         print(f"    {'Component':<15} | {'Error Rate':<10}")
@@ -112,7 +112,7 @@ def cmd_evaluation(args):
         for cat, val in sorted_coer:
             print(f"    {cat:<15} | {val*100:>8.2f}%")
     if samples:
-        print(f"\n  Sample Predictions:")
+        print("\n  Sample Predictions:")
         for i, (gt_s, pred_s) in enumerate(samples):
             print(f"    [{i+1}] GT:   {gt_s[:80]}")
             print(f"        Pred: {pred_s[:80]}")

@@ -60,12 +60,14 @@ Requirements
 
 import os
 import re
+import sys
 import csv
 import glob
 import random
 import time
 import argparse
 from collections import Counter, defaultdict
+from datetime import datetime
 from pathlib import Path
 
 
@@ -241,8 +243,8 @@ def parse_validating_log(path):
                     mins = int(m.group(1)) if m.group(1) else 0
                     secs = float(m.group(2))
                     return mins * 60 + secs
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠ Could not read {path}: {e}", file=sys.stderr)
     return None
 
 
@@ -270,8 +272,8 @@ def parse_plain_training_time(path):
                         end_ts = dt
                     except ValueError:
                         continue
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠ Could not read {path}: {e}", file=sys.stderr)
 
     if start_ts and end_ts:
         return (end_ts - start_ts).total_seconds()
@@ -637,7 +639,7 @@ def plot_training_dashboard(model_data, out_dir):
     """
     from matplotlib.ticker import MaxNLocator
     
-    for i, (name, train_rows, eval_rows) in enumerate(model_data):
+    for _i, (name, train_rows, eval_rows) in enumerate(model_data):
         fig, axes = plt.subplots(3, 2, figsize=(16, 14))
         title_name = name if name.startswith("LaoCRNN-") else f"LaoCRNN-{name}"
         fig.suptitle(f"{title_name} — Tesseract Training Dashboard", 
@@ -798,34 +800,26 @@ def run_plots(data_dir="data", out_dir=PLOTS_DIR):
 # §5  LAO COMPONENT MAP
 # ══════════════════════════════════════════════════════════════════════════════
 
-LAO_COMPONENT_MAP = {
-    "tone":         ["່", "້", "໊", "໋"],
-    "consonant":    ["ກ","ຂ","ຄ","ງ","ຈ","ຊ","ຍ","ດ","ຕ","ຖ","ທ","ນ","ບ","ປ",
-                     "ຜ","ຝ","ພ","ຟ","ມ","ຢ","ຣ","ລ","ວ","ສ","ຫ","ອ","ຮ","ໜ","ໝ","ຽ",
-                     "ໆ", "ຯ"],
-    "lao_number":   ["໐","໑","໒","໓","໔","໕","໖","໗","໘","໙"],
-    "digit":        ["0","1","2","3","4","5","6","7","8","9"],
-    "symbol":       list('.,\"?/!:;- +*=()[]{}\'"@#$%^&_|\\<>«»—…""\'\'•·°±×÷₭¥€£$'),
-    "before_vowel": ["ແ","ໂ","ເ","ໄ","ໃ"],
-    "rear_vowel":   ["ະ","າ","ຳ"],
-    "upper_vowel":  ["ັ","ິ","ີ","ົ","ຶ","ື","໌","ໍ"],
-    "lower_vowel":  ["ຸ","ູ"],
-    "special":      ["ຼ"],
-}
-
-_CHAR_TO_CAT = {}
-for _cat, _chars in LAO_COMPONENT_MAP.items():
-    for _ch in _chars:
-        _CHAR_TO_CAT[_ch] = _cat
-
-
-def get_component_type(ch: str) -> str:
-    return _CHAR_TO_CAT.get(ch, "other")
+# Lao character classes: shared with the PyTorch side so CoER means the same everywhere
+from tesstrain_core.lao_classes import LAO_COMPONENT_MAP, get_component_type, fold_sara_am  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # §6  EDIT DISTANCE UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+_WARNED = set()
+
+
+def _warn_once(what, exc):
+    """Print a failure once per (what, error type) so a broken setup is visible without flooding."""
+    key = (what, type(exc).__name__)
+    if key not in _WARNED:
+        _WARNED.add(key)
+        print(f"  ⚠ {what} failed ({type(exc).__name__}: {exc}). Such lines are scored as empty predictions.",
+              file=sys.stderr)
+
 
 def edit_distance(a, b):
     """Generic Levenshtein distance over any sequence."""
@@ -915,7 +909,8 @@ def run_pytorch(image_path, model, inv_charset, target_h, device):
         from PIL import Image as _PILImage
         pil = _PILImage.open(image_path).convert('L')
         return recognize_line(model, pil, target_h, device, inv_charset, beam_width=0)
-    except Exception:
+    except Exception as e:
+        _warn_once("PyTorch recognition", e)
         return ""
 
 
@@ -941,7 +936,8 @@ def run_tesseract(image_path: str, model_name: str, tessdata_dir: str = CUSTOM_T
         img  = _PILImage.open(image_path)
         text = pytesseract.image_to_string(img, config=config)
         return text.strip()
-    except Exception:
+    except Exception as e:
+        _warn_once(f"Tesseract ({model_name})", e)
         return ""
 
 
@@ -959,7 +955,9 @@ COER_COLS = [
     ("symbol",       "Symbol"),
     ("digit",        "Digit"),
     ("lao_number",   "Lao Number"),
-    ("special",      "Special")
+    ("special",      "Special"),
+    ("latin",        "Latin"),
+    ("space",        "Space"),
 ]
 
 
@@ -982,7 +980,8 @@ def compute_metrics(predictions: dict, test_pairs: list, inference_times: dict =
         t0 = time.time()
 
         for img_path, truth in test_pairs:
-            pred = pred_map.get(img_path, "")
+            pred = fold_sara_am(pred_map.get(img_path, ""))
+            truth = fold_sara_am(truth)
 
             # CER
             d = edit_distance(pred, truth)
@@ -1312,7 +1311,8 @@ def plot_demo_grid(predictions: dict, test_pairs: list,
 
     try:
         pil_img = _PILImage.open(img_path)
-    except Exception:
+    except OSError as e:
+        print(f"  ⚠ Skipping {img_path}: {e}", file=sys.stderr)
         return
 
     fp_sm    = (fm.FontProperties(fname=LAO_FONT_PATH, size=11)
@@ -1440,7 +1440,8 @@ def plot_worst_coer_grid(predictions: dict, test_pairs: list, results: dict,
 
     try:
         pil_img = _PILImage.open(img_path)
-    except Exception:
+    except OSError as e:
+        print(f"  ⚠ Skipping {img_path}: {e}", file=sys.stderr)
         return
 
     fp_sm = (fm.FontProperties(fname=LAO_FONT_PATH, size=11)
@@ -1552,6 +1553,8 @@ def plot_metric_explanation(predictions: dict, test_pairs: list,
         "upper_vowel":  "#ff7f0e", "lower_vowel": "#8c564b",
         "symbol":       "#7f7f7f", "lao_number":  "#17becf",
         "digit":        "#bcbd22", "special":     "#e377c2",
+
+        "latin":        "#393b79", "space":       "#c7c7c7",
         "other":        "#aaaaaa",
     }
 
@@ -2251,7 +2254,6 @@ def run_compare(out_dir=COMPARE_DIR, tessdata_dir=CUSTOM_TESSDATA_DIR, logs_dir=
 # §12 TRAINING TIME REPORT
 # ══════════════════════════════════════════════════════════════════════════════
 
-from datetime import datetime as _dt
 
 # Regex patterns for the timestamped log produced by the segmented trainer
 _TS_RE      = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
@@ -2268,7 +2270,7 @@ _TS_FMT     = "%Y-%m-%d %H:%M:%S"
 def _parse_ts(line):
     """Return datetime from a timestamped log line, or None."""
     m = _TS_RE.match(line)
-    return _dt.strptime(m.group(1), _TS_FMT) if m else None
+    return datetime.strptime(m.group(1), _TS_FMT) if m else None
 
 
 def parse_training_time_report(log_path):
@@ -2299,7 +2301,6 @@ def parse_training_time_report(log_path):
     seg_idx    = 0
     last_bcer  = None       # most recent BCER in current segment
     best_bcer  = None
-    seg_start_ts = None
 
     with open(log_path, "r", encoding="utf-8") as fh:
         for raw in fh:
@@ -2341,7 +2342,6 @@ def parse_training_time_report(log_path):
                     "last_bcer"  : None,
                     "exit_code"  : None,
                 }
-                seg_start_ts = ts
                 last_bcer    = None
                 best_bcer    = None
                 continue
@@ -2617,7 +2617,7 @@ Examples:
         "command",
         nargs="?",
         default="plots",
-        choices=["plots", "compare", "metric_explanation", "timereport", "all"],
+        choices=["plots", "compare", "metric_explanation", "inspection", "timereport", "all"],
         help="Which pipeline to run (default: plots)",
     )
     parser.add_argument(
@@ -2704,12 +2704,16 @@ Examples:
         )
 
     if args.command == "inspection":
-        plot_tesseract_cnn_inspection(
+        run_metric_explanation(
+            out_dir=args.compare_dir,
             tessdata_dir=args.tessdata_dir,
             image_folder=args.realworld_dir if args.realworld_dir else IMAGE_FOLDER,
-            out_dir=args.compare_dir,
+            custom_gt_file=args.custom_gt,
             num_samples=args.num_samples,
-            min_length=args.min_length
+            min_length=args.min_length,
+            max_length=args.max_length,
+            mode="inspection",
+            model_names=args.models,
         )
 
     if args.command in ("timereport", "all"):

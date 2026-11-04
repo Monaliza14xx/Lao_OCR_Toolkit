@@ -113,7 +113,7 @@ case "$CMD" in
     echo "  Running full benchmark suite …"
     print_sep
     export TF_CPP_MIN_LOG_LEVEL=3
-    python3 benchmark.py "${@:2}"
+    python3 experiments/benchmark.py "${@:2}"
     echo ""
     echo "✓ Done.  Check the benchmark_output folder."
     ;;

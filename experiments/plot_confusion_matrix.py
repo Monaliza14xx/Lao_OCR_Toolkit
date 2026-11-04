@@ -1,3 +1,7 @@
+
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: tesstrain_core, tesseract_tools
 import os
 import csv
 import argparse
@@ -65,7 +69,6 @@ def generate_confusion_matrix(csv_path, out_dir, category, models_filter=None):
         model_out_dir = os.path.join(out_dir, model.replace("/", "_").replace("\\", "_"))
         os.makedirs(model_out_dir, exist_ok=True)
         
-        all_true = set(matrix_dict.keys())
         all_pred = set()
         matrix_dict_bucketed = defaultdict(lambda: defaultdict(int))
         for r, preds in matrix_dict.items():
@@ -75,7 +78,6 @@ def generate_confusion_matrix(csv_path, out_dir, category, models_filter=None):
                 else:
                     matrix_dict_bucketed[r]["<OTHER>"] += count
                     
-        all_true = set(matrix_dict_bucketed.keys())
         all_pred = set()
         for t_c, preds in matrix_dict_bucketed.items():
             all_pred.update(preds.keys())
@@ -112,7 +114,7 @@ def generate_confusion_matrix(csv_path, out_dir, category, models_filter=None):
         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
         
         # Color based on percentage (0 to 100)
-        cax = ax.imshow(matrix_pct, cmap="Blues", aspect="auto", vmin=0, vmax=100)
+        ax.imshow(matrix_pct, cmap="Blues", aspect="auto", vmin=0, vmax=100)
         
         ax.set_xticks(np.arange(len(active_cols)))
         ax.set_yticks(np.arange(len(active_rows)))

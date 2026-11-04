@@ -11,7 +11,7 @@ Generates:
   - kl_divergence.json     : KL divergence scores for key features
 
 Usage:
-    python3 validate_augmentation.py \
+    python3 experiments/validate_augmentation.py \
         --real_dir /path/to/lao-real-documents \
         --synth_dir data/lao-augmented-v2 \
         --analysis_params /path/to/analysis_output/augmentation_params.json \
@@ -81,7 +81,7 @@ def collect_features(directory, n_sample=None, ext=(".jpg", ".png", ".tif")):
         try:
             features.append(extract_features(p))
         except Exception as e:
-            pass
+            print(f"  ⚠ Skipping {p}: {e}")
     return features
 
 
@@ -184,7 +184,7 @@ def save_comparison_gallery(real_dir, synth_dir, output_dir, n_pairs=10):
             strip.save(out_path)
             gallery_files.append(out_path)
         except Exception as e:
-            pass
+            print(f"  ⚠ Could not build comparison strip for {real_path}: {e}")
 
     return gallery_files
 
@@ -325,7 +325,7 @@ def main():
     }
 
     kl_scores = {}
-    print(f"\n  KL Divergence D(Real ∥ Synthetic):")
+    print("\n  KL Divergence D(Real ∥ Synthetic):")
     for key in feature_keys:
         real_vals = [f[key] for f in real_feats if key in f]
         synth_vals = [f[key] for f in synth_feats if key in f]
@@ -341,7 +341,7 @@ def main():
 
     # Generate gallery
     gallery_dir = output_dir / "comparison_gallery"
-    print(f"\n  Generating visual comparison gallery...")
+    print("\n  Generating visual comparison gallery...")
     gallery_files = save_comparison_gallery(
         args.real_dir, args.synth_dir, gallery_dir, n_pairs=args.n_gallery)
     print(f"  ✓ Gallery: {len(gallery_files)} comparison images in {gallery_dir}")

@@ -2,7 +2,6 @@ import re
 import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 class CollapseH(nn.Module):
     def forward(self, x):
@@ -410,7 +409,7 @@ def build_model(spec, num_classes):
             continue
         m = re.match(r'^L([frbm])([xy])([s]?)(\d+)$', tok)
         if m:
-            d, ax, sm, hid = m.group(1), m.group(2), m.group(3), int(m.group(4))
+            d, _ax, sm, hid = m.group(1), m.group(2), m.group(3), int(m.group(4))
             if sm == 's':
                 layers.append(SumLSTM(in_c, hid))
                 is_seq, rnn_in, in_c = True, hid, hid

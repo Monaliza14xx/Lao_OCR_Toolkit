@@ -58,11 +58,12 @@ It reads the same ground-truth format as [tesstrain](https://github.com/tesserac
 - [📊 Evaluation & Analysis Tools](#-evaluation--analysis-tools)
   - [tesseract_tools.py — Training Plots, Model Comparison & Timing](#tesseract_toolspy)
   - [tesstrain_core/compare.py — PyTorch Model Comparison](#tesstrain_corecomparepy)
-  - [compare_cross.py — Original vs Fine-tuned Cross-Comparison](#compare_crosspy)
+  - [experiments/compare_cross.py — Original vs Fine-tuned Cross-Comparison](#experimentscompare_crosspy)
 - [🐛 Troubleshooting](#-troubleshooting)
 - [📄 Command Reference](#-command-reference)
 - [🛠️ Utilities](#️-utilities)
 - [⚠️ Known Limitations](#️-known-limitations)
+- [🧪 Development](#-development)
 
 ---
 
@@ -372,7 +373,7 @@ The profiling script used to measure the real documents is **not included** in t
 #### Step 2 — Enrich your training corpus
 
 ```bash
-python3 build_augmented_corpus.py \
+python3 experiments/build_augmented_corpus.py \
     --real_gt /path/to/your-real-documents \
     --base_corpus data/lao-corpus.txt \
     --output data/lao-corpus-enriched.txt \
@@ -401,7 +402,7 @@ python3 gen_data_from_text.py \
 #### Step 4 — Validate the domain gap is closed
 
 ```bash
-python3 validate_augmentation.py \
+python3 experiments/validate_augmentation.py \
     --real_dir /path/to/your-real-documents \
     --synth_dir data/lao-augmented-v2 \
     --n_synth_sample 500
@@ -558,20 +559,38 @@ python3 torch_train.py plot --model_name lao
 
 #### Training output
 
+Every `--debug_interval` iterations the trainer prints a report like this (this one is from an iteration where validation ran):
+
 ```
-──────────────────────────────────────────────────────────────────────
-  Iteration    500/10000  │  Epoch 2  │  312 samples/sec
-  Loss=2.1456  avg=2.3102  │  CER=0.4521  WER=0.7834  Acc=12.50%  │  Mean RMS=0.043521
-  Eval — Loss=2.4012  CER=0.4810  WER=0.8020  Acc=10.94%
-  GPU=2.10GB (peak=3.80GB)
-  ┌─── Sample Predictions ───
-  │ [1] GT:   ສາທາລະນະລັດ ປະຊາທິປະໄຕ ປະຊາຊົນລາວ
-  │     Pred: ສາທາລະນະລັດ ປະຊາທີປະໄຕ ປະຊາຊົນລາວ
-  └────────────────────────
-──────────────────────────────────────────────────────────────────────
+━━ iter 500/10,000 (5.0%) · epoch 2 · 312 lines/s · elapsed 2m40s · ETA 50m40s ━━
+              loss      CER      WER   line acc
+  train     2.1456   45.21%   78.34%     12.50%   (avg loss 2.3102, 1 batch)
+  eval      2.4012   48.10%   80.20%     10.94%   ★ best so far
+  CoER     tone 12.4% · upper 8.1% · lower 3.0% · front 1.2% · rear 2.1%
+           cons 5.2% · special 0.0% · Lao num 10.0% · digit 2.0% · space 3.5%
+           sym 4.0%
+           worst: tone marks
+  model    weight RMS 0.0435 · lr 1e-04 · GPU 2.10 GB (peak 3.80 GB)
+  samples  [1] ✗ CER 3.0%
+             GT   ສາທາລະນະລັດ ປະຊາທິປະໄຕ ປະຊາຊົນລາວ
+             Pred ສາທາລະນະລັດ ປະຊາ⟦ທິ→ທີ⟧ປະໄຕ ປະຊາຊົນລາວ
+           [2] ✓ exact
+             GT   ສັນຕິພາບ ເອກະລາດ
+           [3] ✗ CER 16.7%
+             GT   ກະຊວງສຶກສາທິການ ແລະ ກິລາ
+             Pred ກະຊວງສຶກສາທິການ ⟦−ແລະ ⟧ກິລາ
+──────────────────────────────────────────────────────────────────────────────
 ```
 
-Training CER/WER are measured on the current batch; the `Eval` line appears every 5 × `--debug_interval` steps. `<model>_best.pt` is saved whenever eval CER improves (or train CER, if there is no validation list). Metrics are written to `data/<model>/training.log` (CSV).
+| Row | Meaning |
+|-----|---------|
+| `train` | Loss, CER, WER and line accuracy (exact-match lines) on the batch just trained, so it's noisy |
+| `eval` | The same on the validation list. Runs every 5 × `--debug_interval` steps; ★ marks a new best, which is saved as `<model>_best.pt` (train CER is used instead when there is no validation list) |
+| `CoER` | Component error rate per Lao character class: tone marks, upper / lower / front / rear vowels, consonants, special (ຼ), Lao and Arabic digits, Latin letters, spaces, symbols ([full list](metrics.md)). Shown as `CoER*` between eval runs, when it comes from the training batch only |
+| `model` | RMS of all weights, current learning rate, GPU memory |
+| `samples` | Three training lines. Differences are marked `⟦GT→Pred⟧` (wrong), `⟦−GT⟧` (missing) and `⟦+Pred⟧` (extra) |
+
+Everything is also written to `data/<model>/training.log` (CSV, including `coer_<class>` columns) and to TensorBoard (`CoER/<class>` for eval).
 
 ### Evaluation
 
@@ -726,27 +745,20 @@ python3 torch_train.py clean --model_name lao
 Lao_OCR_Toolkit/
 ├── torch_train.py              # CLI: 16 subcommands (training, evaluation, recognize, export, …)
 ├── gen_data_from_text.py       # Synthetic data generator (CPU/GPU) + 4 augmentation presets + .lstmf writer
-├── build_augmented_corpus.py   # Enrich corpus from real GT + oversample rare chars
-├── validate_augmentation.py    # KL divergence + gallery validation of augmented data
 ├── segment_document.py         # Scanned PDF/images → deskew → layout analysis → line crops
 ├── gen_documents.py            # Synthetic Lao letter pages → scan simulation → same line cropping
 ├── compare_line_stats.py       # Real vs synthetic line statistics (domain gap check)
-├── tesseract_tools.py          # Training plots · Tesseract model comparison · timing report
-├── compare_cross.py            # Cross-compare original Tesseract vs fine-tuned (CSV)
-├── compare_pt_vs_tess.py       # Tesseract (.traineddata) vs PyTorch (.pt) evaluation
-├── compared_model.py           # Manual comparison of compiled Tesseract models
-├── benchmark.py                # Full Tesseract-vs-PyTorch benchmark suite (run.sh benchmark)
-├── run_benchmark.py            # Dependency-checking runner for compare_pt_vs_tess.py
+├── tesseract_tools.py          # Training plots · Tesseract model comparison · inspection · timing report
 ├── log_to_tensorboard.py       # Export Tesseract training logs to TensorBoard
-├── plot_training.py            # Plots from Tesseract LSTM training logs
-├── plot_confusion_matrix.py, generate_projection_profile.py   # Figures
 ├── run.sh                      # Shortcut launcher (plots, compare, benchmark, …)
 ├── fonts/                      # Lao (Phetsarath, Saysettha) and Latin fonts for synthetic data
 ├── tesstrain_core/
 │   ├── model.py                # VGSL spec → nn.Sequential (incl. attention/Conformer layers)
 │   ├── training.py             # GPU training loop (CTC loss, checkpoints, TensorBoard)
+│   ├── report.py               # Console progress report printed during training
 │   ├── dataset.py              # .lstmf reader + PyTorch Dataset
-│   ├── metrics.py              # CTC decoding, CER/WER, Lao CoER
+│   ├── metrics.py              # CTC decoding, CER/WER, CoER
+│   ├── lao_classes.py          # Lao character classes (5 tiers) used by every CoER calculation
 │   ├── evaluate.py, recognize.py, export.py
 │   ├── doc_layout.py           # Deskew, layout analysis, Lao-aware line segmentation
 │   ├── doc_synth.py            # Synthetic letter layout + scan simulation
@@ -754,10 +766,14 @@ Lao_OCR_Toolkit/
 │   ├── tesseract_transfer.py   # Load Tesseract LSTM weights into PyTorch
 │   ├── compare.py, inspection.py, projection.py, plotting.py   # Analysis & figures
 │   └── command_utils.py, utils.py
+├── experiments/                # Research scripts: benchmarks, cross-comparisons, corpus
+│   └── …                       # enrichment, paper figures (see experiments/README.md)
+├── tests/                      # pytest suite (classes, metrics, report, model, document pipeline)
+├── .github/workflows/ci.yml    # Lint + tests on every push / pull request
 ├── LSTM_WEIGHTS.md             # Why PyTorch LSTMs have slightly more parameters than Tesseract's
 ├── metrics.md                  # How CER / WER / CoER are computed
-├── THESIS_REPORT.md            # Research write-up
-├── requirements.txt
+├── pyproject.toml              # Project metadata, pytest and ruff settings
+├── requirements.txt, requirements-dev.txt
 ├── LICENSE
 └── README.md
 
@@ -777,7 +793,7 @@ data/
 │   ├── tensorboard/                # TensorBoard event files
 │   └── unicharset                  # Tesseract unicharset
 ├── lao-augmented-v2/               # Generated by gen_data_from_text.py --preset real-match
-│   └── validation/                 # Generated by validate_augmentation.py
+│   └── validation/                 # Generated by experiments/validate_augmentation.py
 │       ├── validation_report.md
 │       ├── kl_divergence.json
 │       └── comparison_gallery/
@@ -790,7 +806,7 @@ data/
 │   ├── plot_metric_explanation_<model>.png  # one per model
 │   └── report*.csv
 ├── tesseract_comparison/           # tesseract_tools.py compare outputs
-└── cross_comparison/               # compare_cross.py outputs
+└── cross_comparison/               # experiments/compare_cross.py outputs
 
 plots/                              # tesseract_tools.py training plots
 ```
@@ -870,7 +886,7 @@ The model is built from the VGSL string (CNN layers → height collapse → LSTM
 | `torch_train.py evaluation` | CER, WER, line accuracy and per-component Lao errors (CoER) on the validation list |
 | `torch_train.py compare` | Several models on the same image folders (synthetic and real), with plots and CSV reports |
 | `torch_train.py inspection`, `confusion-matrix`, `wer-distribution` | What the network sees, which characters it confuses, where errors cluster |
-| `tesseract_tools.py`, `compare_cross.py`, `benchmark.py` | Tesseract models and Tesseract vs PyTorch comparisons |
+| `tesseract_tools.py`, `experiments/compare_cross.py`, `experiments/benchmark.py` | Tesseract models and Tesseract vs PyTorch comparisons |
 
 ### ④ Deployment and inference
 
@@ -1073,7 +1089,7 @@ pip install onnx>=1.14.0 onnxruntime>=1.15.0
 | `recognize` | Run OCR inference | `--image`, `--psm`, `--beam_width`, `--wordlist` |
 | `plot` | Training dashboard (7 plots) | `--model_name` |
 | `inspection` | Export feature map images | `--model_name`, `--num_samples` |
-| `compare-inspection` | Side-by-side activation maps and predictions across models | `--model_name`, `--num_samples` |
+| `compare-inspection` | Side-by-side activation maps and predictions across models | `--pairs A:B …`, `--num_samples` |
 | `compare` | Compare logs and evaluate on custom set | `--models`, `--custom_img_dir`, `--custom_realworld_img_dir` |
 | `projection` | Vertical projection-profile alignment grids | `--models`, `--custom_img_dir` |
 | `wer-distribution` | WER grouped by ground-truth word count | `--model_name`, `--custom_dir` |
@@ -1198,7 +1214,7 @@ Outputs to `data/comparison/` (or `--output_dir`):
 
 ---
 
-### `compare_cross.py`
+### `experiments/compare_cross.py`
 
 **Cross-compare original Tesseract models vs your fine-tuned models — CSV only.**
 
@@ -1206,10 +1222,10 @@ Useful for a clean, quantitative baseline comparison for papers or reports.
 
 ```bash
 # Default paths (edit CONFIG block at the top)
-python compare_cross.py
+python experiments/compare_cross.py
 
 # Override paths
-python compare_cross.py \
+python experiments/compare_cross.py \
   --image_folder data/lao-ground-truth-test \
   --out_dir data/cross_comparison \
   --orig_tessdata /usr/share/tessdata
@@ -1275,6 +1291,23 @@ These are known issues in the current code. Keep them in mind when you read or r
 `fonts/` contains Lao fonts (Phetsarath, Saysettha OT) and Times Newer Roman for synthetic data generation; each font keeps its own license. Microsoft Times New Roman is **not** included. If you want it as the secondary font for digits and Latin text, pass your own copy with `--sec_font`; otherwise the primary font is used.
 
 ---
+
+## 🧪 Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest            # unit + end-to-end tests (about 10 s on CPU)
+ruff check .      # lint
+```
+
+The tests cover the Lao character classes, CER/WER/CoER, the training report, text
+normalization, the VGSL model builder, the command-line entry points, and the document
+pipeline end to end (synthetic letter → layout analysis → labelled line crops). The
+document test needs Pillow built with libraqm and is skipped otherwise. GitHub Actions
+runs lint and tests on every push and pull request.
+
+Research scripts that reproduce the original experiments live in
+[`experiments/`](experiments/README.md); run them from the repository root.
 
 ## 📜 License
 
