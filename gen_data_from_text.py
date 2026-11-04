@@ -44,10 +44,13 @@ import re
 import struct
 import sys
 import time
+import unicodedata
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
+from PIL import features as _pil_features
 
 
 # ============================================================================
@@ -55,88 +58,62 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 # ============================================================================
 
 def load_corpus(corpus_path, max_line_chars=200):
-    """Load text lines from corpus file and normalize Lao orthography."""
-    # We strictly use utf-8 and utf-8-sig to ensure proper Lao UTF-8 character decoding.
-    # We do NOT use utf-16 or latin-1 as fallback because they misinterpret Lao UTF-8 bytes into mojibake that fails to render.
-    encodings = ['utf-8', 'utf-8-sig']
-    for encoding in encodings:
+    """Load text lines from a UTF-8 corpus and normalize Lao orthography.
+
+    Lines that are empty after normalization or longer than max_line_chars
+    are skipped.
+    """
+    # Strict UTF-8 only: utf-16 / latin-1 fallbacks turn Lao bytes into mojibake.
+    for encoding, errors in (('utf-8-sig', 'strict'), ('utf-8', 'replace')):
         try:
             lines = []
-            with open(corpus_path, 'r', encoding=encoding) as f:
+            with open(corpus_path, 'r', encoding=encoding, errors=errors) as f:
                 for line in f:
-                    line = line.strip()
+                    line = normalize_lao_text(line)
                     if line and len(line) <= max_line_chars:
-                        line = normalize_lao_text(line)
                         lines.append(line)
-            print(f"  Successfully loaded corpus {corpus_path} using {encoding} encoding ({len(lines)} lines)")
+            if errors == 'replace':
+                print(f"  Warning: malformed UTF-8 in {corpus_path}; bad bytes were replaced.")
+            print(f"  Loaded corpus {corpus_path} ({len(lines)} lines)")
             return lines
-        except (UnicodeError, LookupError):
+        except UnicodeError:
             continue
-            
-    # Ultimate fallback: load as UTF-8 with replacement for any isolated malformed bytes
-    print(f"  Warning: Strict UTF-8 decoding encountered malformed bytes in {corpus_path}. Loading with utf-8 (errors='replace').")
-    lines = []
-    with open(corpus_path, 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            line = line.strip()
-            if line and len(line) <= max_line_chars:
-                line = normalize_lao_text(line)
-                lines.append(line)
-    return lines
+    return []
 
 
-def load_fonts(font_paths, font_size=36):
-    """Load PIL fonts from paths. Falls back to default if not found."""
-    fonts = []
-    for fp in font_paths:
-        try:
-            fonts.append(ImageFont.truetype(fp, font_size))
-        except Exception as e:
-            print(f"  Warning: Cannot load font {fp}: {e}")
-    if not fonts:
-        print("  Using default font (limited character support)")
-        fonts.append(ImageFont.load_default())
-    return fonts
-
-
-# Lao combining character codepoints that should NOT advance the cursor.
+# Lao codepoints that attach to the preceding base letter (no cursor advance of
+# their own). ຳ (AM) is a spacing letter in Unicode, but its ring sits over the
+# base, so it is drawn together with the base in the fallback renderer.
 _LAO_COMBINING = frozenset([
-    # Upper vowel signs (above/right)
-    0x0EB1,  # LAO VOWEL SIGN MAI KAN
-    0x0EB3,  # LAO VOWEL SIGN AM (Technically spaced but clusters structurally)
-    0x0EB4,  # LAO VOWEL SIGN I
-    0x0EB5,  # LAO VOWEL SIGN II
-    0x0EB6,  # LAO VOWEL SIGN Y
-    0x0EB7,  # LAO VOWEL SIGN YY
-    0x0EBB,  # LAO VOWEL SIGN MAI KON
-    # Lower vowel signs (below)
-    0x0EB8,  # LAO VOWEL SIGN U
-    0x0EB9,  # LAO VOWEL SIGN UU
-    0x0EBC,  # LAO SEMIVOWEL SIGN LO
-    # Tone marks (above)
-    0x0EC8,  # LAO TONE MAI EK
-    0x0EC9,  # LAO TONE MAI THO
-    0x0ECA,  # LAO TONE MAI TI
-    0x0ECB,  # LAO TONE MAI CATAWA
-    0x0ECC,  # LAO CANCELLATION MARK
-    0x0ECD,  # LAO NIGGAHITA
+    0x0EB1,  # MAI KAN        (above)
+    0x0EB3,  # AM             (spacing, ring over base)
+    0x0EB4, 0x0EB5, 0x0EB6, 0x0EB7,  # I, II, Y, YY (above)
+    0x0EBB,  # MAI KON        (above)
+    0x0EB8, 0x0EB9,  # U, UU  (below)
+    0x0EBC,  # SEMIVOWEL LO   (below)
+    0x0EC8, 0x0EC9, 0x0ECA, 0x0ECB,  # tone marks (above)
+    0x0ECC,  # CANCELLATION MARK (above)
+    0x0ECD,  # NIGGAHITA      (above)
 ])
+
+_LAO_SUBSCRIPT_LO = '\u0EBC'
+# Above/below vowel signs, including NIGGAHITA (ໍ), which is a vowel, not a tone.
+_LAO_VOWEL_MARKS = frozenset([0x0EB1, 0x0EB4, 0x0EB5, 0x0EB6, 0x0EB7, 0x0EBB,
+                              0x0EB8, 0x0EB9, 0x0EBC, 0x0ECD])
+_LAO_TONE_MARKS = frozenset([0x0EC8, 0x0EC9, 0x0ECA, 0x0ECB, 0x0ECC])
+_LAO_AM = '\u0EB3'
+_ZERO_WIDTH = ('\u200b', '\u200c', '\u200d', '\u2060', '\ufeff')
 
 
 def _split_grapheme_clusters(text):
-    """
-    Split text into grapheme clusters for Lao rendering.
+    """Split text into clusters: one base character plus its Lao combining marks.
 
-    A cluster is one base character followed by any number of Lao combining
-    marks. Whitespace is kept as its own cluster so the caller can skip it.
-    All other scripts fall through as single-codepoint clusters.
+    Whitespace and non-Lao characters each form their own cluster.
     """
     clusters = []
     current = ''
     for ch in text:
-        cp = ord(ch)
-        if cp in _LAO_COMBINING and current:
-            # Attach to the current cluster (no cursor advance)
+        if ord(ch) in _LAO_COMBINING and current and not current.isspace():
             current += ch
         else:
             if current:
@@ -148,235 +125,260 @@ def _split_grapheme_clusters(text):
 
 
 def normalize_lao_text(text):
+    """Return text in the standard Lao storage order used by real typed documents.
+
+    - NFC, zero-width characters removed, whitespace collapsed and trimmed.
+    - ໍ + າ typed as two characters (optionally with a tone mark between them)
+      becomes the single letter ຳ, which renders identically.
+    - Inside each cluster: base, subscript ຼ, vowel marks (incl. ໍ), tone marks,
+      then ຳ. Tone marks are stored BEFORE ຳ, e.g. ນ້ຳ = ນ + ້ + ຳ, which is how
+      Lao keyboards and real ground truth encode it.
     """
-    Ensure correct Lao orthographic order: Base Consonant + Vowels + Tone Marks.
-    Many corpora have typos where tone marks are typed before vowels (e.g. ຜູ້ instead of ຜູ້).
-    This function reorders them to canonical sequence to ensure correct rendering
-    and high-quality ground truth labels for the OCR model.
-    """
-    _LAO_VOWELS = {0x0EB1, 0x0EB3, 0x0EB4, 0x0EB5, 0x0EB6, 0x0EB7, 0x0EBB, 0x0EB8, 0x0EB9, 0x0EBC}
-    _LAO_TONES = {0x0EC8, 0x0EC9, 0x0ECA, 0x0ECB, 0x0ECC, 0x0ECD}
-    
-    clusters = _split_grapheme_clusters(text)
-    normalized = []
-    
-    for cluster in clusters:
+    if not text:
+        return ''
+    text = unicodedata.normalize('NFC', text)
+    for zw in _ZERO_WIDTH:
+        text = text.replace(zw, '')
+    text = re.sub(r'\u0ECD([\u0EC8-\u0ECB]?)\u0EB2', '\\1\u0EB3', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    out = []
+    for cluster in _split_grapheme_clusters(text):
         if len(cluster) > 1:
-            base = cluster[0]
-            vowels = [c for c in cluster[1:] if ord(c) in _LAO_VOWELS]
-            tones = [c for c in cluster[1:] if ord(c) in _LAO_TONES]
-            others = [c for c in cluster[1:] if ord(c) not in _LAO_VOWELS and ord(c) not in _LAO_TONES]
-            cluster = base + "".join(vowels) + "".join(tones) + "".join(others)
-        normalized.append(cluster)
-        
-    return "".join(normalized)
+            base, marks = cluster[0], cluster[1:]
+            vowels = [c for c in marks if ord(c) in _LAO_VOWEL_MARKS]
+            vowels.sort(key=lambda c: c != _LAO_SUBSCRIPT_LO)  # ຼ first, rest keep order
+            tones = [c for c in marks if ord(c) in _LAO_TONE_MARKS]
+            am = [c for c in marks if c == _LAO_AM]
+            cluster = base + ''.join(vowels) + ''.join(tones) + ''.join(am)
+        out.append(cluster)
+    return ''.join(out)
 
 
+# ----------------------------------------------------------------------------
+#  Fonts
+# ----------------------------------------------------------------------------
 
-def _draw_cluster_and_realign(cluster, font, canvas_h, scratch_w, padding, bg_color, fg_color):
-    """Draw a grapheme cluster on a scratch canvas and horizontally realign any runaway combining marks.
+_HAS_RAQM = _pil_features.check('raqm')
+# Words with stacked marks: a font whose HarfBuzz output for these is much wider
+# than the same word without marks has broken mark positioning.
+_SHAPING_PROBES = ('ຂຶ້ນ', 'ເຂົ້າ', 'ນ້ຳ', 'ກີ່', 'ຜູ້', 'ຫຼ້າ')
 
-    Without HarfBuzz (libraqm), PIL/FreeType on systems/fonts like phetsarath_ot.ttf pushes
-    stacked combining diacritics (e.g. tone mark above vowel, as in 'ຂຶ້') to wild horizontal
-    offsets (like x = +1563).
-    This function detects separated horizontal ink islands and shifts them left so that
-    they align perfectly above the center of the base consonant at their designed vertical levels.
+
+@lru_cache(maxsize=None)
+def _load_font(path, size, shaped):
+    engine = ImageFont.Layout.RAQM if shaped else ImageFont.Layout.BASIC
+    return ImageFont.truetype(path, size, layout_engine=engine)
+
+
+@lru_cache(maxsize=None)
+def _font_cmap(path):
+    """Codepoints the font maps, or None when fontTools isn't installed."""
+    try:
+        from fontTools.ttLib import TTFont
+        return frozenset(TTFont(path, lazy=True, fontNumber=0).getBestCmap())
+    except Exception:
+        return None
+
+
+def font_covers(path, text):
+    """True if the font has a glyph for every non-space character in text."""
+    cmap = _font_cmap(path)
+    return cmap is None or all(ord(c) in cmap for c in text if not c.isspace())
+
+
+@lru_cache(maxsize=None)
+def font_shapes_correctly(path):
+    """True if HarfBuzz places stacked Lao marks sanely with this font.
+
+    Some fonts (e.g. phetsarath_ot.ttf) have mark tables that push a tone mark
+    over a vowel ~1300 px to the right under HarfBuzz; those use the fallback
+    cluster renderer instead.
+    """
+    if not _HAS_RAQM:
+        return False
+    try:
+        f = _load_font(path, 40, True)
+        for word in _SHAPING_PROBES:
+            base = ''.join(c for c in word if unicodedata.category(c) != 'Mn')
+            if f.getlength(word) > f.getlength(base) + 8:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _is_lao(ch):
+    return 0x0E80 <= ord(ch) <= 0x0EFF
+
+
+def _script_runs(text):
+    """Split text into [is_lao, run] pieces; spaces join the run they follow."""
+    runs = []
+    for ch in text:
+        lao = runs[-1][0] if (ch.isspace() and runs) else (_is_lao(ch) or ch.isspace())
+        if runs and runs[-1][0] == lao:
+            runs[-1][1] += ch
+        else:
+            runs.append([lao, ch])
+    return runs
+
+
+# ----------------------------------------------------------------------------
+#  Line rendering
+# ----------------------------------------------------------------------------
+
+def render_line(text, font_path, size, sec_font_path=None, bg_color=255, fg_color=0):
+    """Render one text line to a grayscale image.
+
+    Lao runs use font_path; digits, Latin and punctuation use sec_font_path when
+    it has the glyphs (the primary font otherwise). All runs share one baseline.
+
+    Returns None when this font cannot render the text faithfully (a missing
+    glyph, or a cluster that draws no ink), so the caller can try another font
+    instead of saving an image that doesn't match its label.
+    """
+    if not text or text.isspace():
+        return None
+    sec_font_path = sec_font_path or font_path
+    plan = []
+    for lao, run in _script_runs(text):
+        path = font_path if lao else sec_font_path
+        if not font_covers(path, run):
+            if font_covers(font_path, run):
+                path = font_path
+            else:
+                return None
+        plan.append((lao, run, path))
+
+    shaped = font_shapes_correctly(font_path)
+    ascent, descent = _load_font(font_path, size, shaped).getmetrics()
+    margin = 2 * size
+    canvas_h = ascent + descent + 2 * margin
+    baseline = margin + ascent
+
+    if shaped:
+        fonts = [_load_font(p, size, _HAS_RAQM) for _, _, p in plan]
+        widths = [f.getlength(run) for f, (_, run, _) in zip(fonts, plan)]
+        canvas = Image.new('L', (int(sum(widths)) + 2 * margin, canvas_h), bg_color)
+        draw = ImageDraw.Draw(canvas)
+        x = margin
+        for f, (lao, run, _), w in zip(fonts, plan, widths):
+            draw.text((x, baseline), run, font=f, fill=fg_color, anchor='ls',
+                      language='lo' if lao else None)
+            x += w
+    else:
+        canvas = _render_clusters(plan, size, canvas_h, baseline, margin, bg_color, fg_color)
+        if canvas is None:
+            return None
+
+    return _crop_line(canvas, baseline, ascent, descent, size, bg_color)
+
+
+def _crop_line(canvas, baseline, ascent, descent, size, bg_color):
+    """Crop to the ink horizontally and to the font's line box vertically.
+
+    Cropping vertically to the font's ascent/descent (not to the ink) keeps the
+    letter size the same whether or not a line has upper/lower marks; the
+    trainer rescales every line to a fixed height. Margins are randomized.
+    """
+    arr = np.array(canvas)
+    ink = arr < (bg_color - 55)
+    cols = np.where(ink.any(axis=0))[0]
+    rows = np.where(ink.any(axis=1))[0]
+    if cols.size == 0:
+        return None
+    top = min(baseline - ascent, int(rows[0]))
+    bottom = max(baseline + descent, int(rows[-1]) + 1)
+    pad_v = lambda: int(round(random.uniform(0.03, 0.15) * size))
+    pad_h = lambda: int(round(random.uniform(0.1, 0.6) * size))
+    w, h = canvas.size
+    return canvas.crop((max(0, int(cols[0]) - pad_h()), max(0, top - pad_v()),
+                        min(w, int(cols[-1]) + 1 + pad_h()), min(h, bottom + pad_v())))
+
+
+def _draw_cluster_and_realign(cluster, font, canvas_h, scratch_w, y_baseline, bg_color, fg_color):
+    """Draw a grapheme cluster on a scratch canvas and pull runaway marks back.
+
+    Without working shaping, some fonts (e.g. phetsarath_ot.ttf) place stacked
+    marks (tone above vowel, as in 'ຂຶ້') at wild horizontal offsets. Ink islands
+    that land far right of the base letter are moved back above its centre.
     """
     scratch = Image.new('L', (scratch_w, canvas_h), bg_color)
-    ImageDraw.Draw(scratch).text((0, padding), cluster, font=font, fill=fg_color)
+    ImageDraw.Draw(scratch).text((0, y_baseline), cluster, font=font, fill=fg_color, anchor='ls')
     s_arr = np.array(scratch)
 
-    # Find ink columns
     ink_cols = np.where(np.any(s_arr < (bg_color - 15), axis=0))[0]
     if ink_cols.size == 0:
         return scratch, s_arr
 
-    # Segment into contiguous horizontal islands (gaps > 5 pixels)
+    # Contiguous horizontal ink islands (gaps > 5 px split them)
     islands = []
     start = ink_cols[0]
     for idx in range(1, len(ink_cols)):
-        if ink_cols[idx] > ink_cols[idx-1] + 5:
-            islands.append((start, ink_cols[idx-1]))
+        if ink_cols[idx] > ink_cols[idx - 1] + 5:
+            islands.append((start, ink_cols[idx - 1]))
             start = ink_cols[idx]
     islands.append((start, ink_cols[-1]))
 
-    # If multiple islands exist and the others are pushed far to the right,
-    # shift them horizontally to center-align above Island 0 (the base consonant)
     if len(islands) > 1:
         isl0_l, isl0_r = islands[0]
-        w0 = isl0_r - isl0_l + 1
-        c0 = isl0_l + w0 // 2
-
-        # Create a recomposited canvas array
-        recomp_arr = np.ones((canvas_h, scratch_w), dtype=np.uint8) * bg_color
-        recomp_arr[:, isl0_l:isl0_r+1] = s_arr[:, isl0_l:isl0_r+1]
-
+        c0 = isl0_l + (isl0_r - isl0_l + 1) // 2
+        recomp = np.full((canvas_h, scratch_w), bg_color, dtype=np.uint8)
+        recomp[:, isl0_l:isl0_r + 1] = s_arr[:, isl0_l:isl0_r + 1]
         for isl_l, isl_r in islands[1:]:
-            # If the island is pushed far right (runaway diacritic)
-            if isl_l - isl0_r > 15:
+            if isl_l - isl0_r > 15:  # runaway mark: centre it over the base
                 w_i = isl_r - isl_l + 1
-                target_l = max(0, c0 - w_i // 2)
-                target_r = min(scratch_w - 1, target_l + w_i - 1)
-                actual_w = target_r - target_l + 1
-
-                slice_target = recomp_arr[:, target_l:target_r+1]
-                slice_source = s_arr[:, isl_l:isl_l+actual_w]
-                recomp_arr[:, target_l:target_r+1] = np.minimum(slice_target, slice_source)
+                t_l = max(0, c0 - w_i // 2)
+                t_r = min(scratch_w - 1, t_l + w_i - 1)
+                aw = t_r - t_l + 1
+                recomp[:, t_l:t_r + 1] = np.minimum(recomp[:, t_l:t_r + 1], s_arr[:, isl_l:isl_l + aw])
             else:
-                # Normal close/overlapping components, copy directly
-                recomp_arr[:, isl_l:isl_r+1] = np.minimum(recomp_arr[:, isl_l:isl_r+1], s_arr[:, isl_l:isl_r+1])
-        s_arr = recomp_arr
+                recomp[:, isl_l:isl_r + 1] = np.minimum(recomp[:, isl_l:isl_r + 1], s_arr[:, isl_l:isl_r + 1])
+        s_arr = recomp
         scratch = Image.fromarray(s_arr)
-
     return scratch, s_arr
 
 
-def render_text_line(text, font, sec_font=None, padding=10, bg_color=255, fg_color=0):
-    """Render a single text line to a grayscale PIL Image.
+def _render_clusters(plan, size, canvas_h, baseline, margin, bg_color, fg_color):
+    """Fallback renderer for fonts whose HarfBuzz output is broken.
 
-    Uses grapheme-cluster-aware rendering to fix PIL's gap bug with Lao
-    combining characters. PIL/FreeType without HarfBuzz advances the cursor
-    after EVERY codepoint including combining vowels/tone marks, producing
-    spurious gaps (e.g. "ລຶ    ບລ້າງ").
-
-    Strategy:
-      1. Split text into grapheme clusters (base + all combining marks).
-      2. Render each cluster on a large scratch canvas at the SAME x position.
-      3. Measure the actual ink width of that cluster to get the true advance.
-      4. Composite onto the main canvas and advance x by the ink width.
-      5. Auto-crop the final canvas to the ink region + padding.
+    Draws one grapheme cluster at a time (base + marks together) so marks can't
+    drift, then advances by the font's advance width plus light tracking.
+    Returns None if any cluster draws no ink (its label would be wrong).
     """
-    if sec_font is None:
-        try:
-            tnr_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tesstrain_core/font/TimesNewRoman.ttf")
-            sec_font = ImageFont.truetype(tnr_path if os.path.exists(tnr_path) else "tesstrain_core/font/TimesNewRoman.ttf", getattr(font, 'size', 36))
-        except Exception:
-            sec_font = font
+    tracking = max(1, int(round(size * 0.02)))
+    scratch_w = 4000  # wide enough for runaway marks before they are realigned
+    pieces = []
+    x = margin
+    for _, run, path in plan:
+        font = _load_font(path, size, False)
+        space_w = font.getlength(' ') or size * 0.3
+        for cluster in _split_grapheme_clusters(run):
+            if cluster.isspace():
+                x += space_w * len(cluster)
+                continue
+            scratch, s_arr = _draw_cluster_and_realign(cluster, font, canvas_h, scratch_w,
+                                                       baseline, bg_color, fg_color)
+            ink_cols = np.where(np.any(s_arr < (bg_color - 15), axis=0))[0]
+            if ink_cols.size == 0:
+                return None
+            ink_l, ink_r = int(ink_cols[0]), int(ink_cols[-1]) + 1
+            pieces.append((int(round(x)) - ink_l, s_arr[:, :ink_r]))
+            ink_w = ink_r - ink_l
+            adv = font.getlength(cluster)
+            if adv < 0 or adv > max(ink_w * 2 + 15, size * 1.5):  # broken advance
+                adv = ink_w + 2
+            x += max(adv, ink_w + 1) + tracking
 
-    # Estimate a safe canvas height from font metrics
-    try:
-        ascent, descent = font.getmetrics()
-        canvas_h = max(ascent + descent + padding * 4, 60)
-    except Exception:
-        canvas_h = 120
-
-    canvas_w = 6000
-    canvas = Image.new('L', (canvas_w, canvas_h), bg_color)
-    draw = ImageDraw.Draw(canvas)
-
-    clusters = _split_grapheme_clusters(text)
-
-    # Estimate a reasonable word-space width from the font metrics.
-    # Use ~40% of the em-square (ascent) so spaces look natural.
-    try:
-        space_width = max(6, int(font.getmetrics()[0] * 0.4))
-    except Exception:
-        space_width = 12
-
-    x = padding * 2
-    scratch_w = 4000  # wide enough for any single cluster and runaway marks
-
-    for cluster in clusters:
-        # Handle whitespace clusters as a fixed-width visual gap.
-        # ASCII space, NBSP, and common Unicode spaces all advance by space_width.
-        if all(ord(c) <= 0x20 or 0x2000 <= ord(c) <= 0x200F for c in cluster):
-            x += space_width * len(cluster)
-            continue
-
-        # Use primary Lao font for any cluster containing Lao codepoints (\u0E80-\u0EDF),
-        # otherwise use secondary font (Times New Roman) for numbers (0-9), Latin, symbols, and punctuation.
-        if any(0x0E80 <= ord(c) <= 0x0EDF for c in cluster):
-            c_font = font
-        else:
-            c_font = sec_font
-
-        # Render the cluster on a scratch canvas to capture its pixel width.
-        # This is critical for systems without libraqm where marks float right.
-        scratch, s_arr = _draw_cluster_and_realign(cluster, c_font, canvas_h, scratch_w, padding, bg_color, fg_color)
-        ink_cols = np.where(np.any(s_arr < (bg_color - 15), axis=0))[0]
-
-        # If chosen c_font drew 0 ink pixels (e.g. font chosen was Latin-only or load_default()),
-        # try sec_font, and if still 0 ink and cluster contains Lao, try fallback Lao font.
-        if ink_cols.size == 0:
-            fallback_lao = None
-            try:
-                script_dir = os.path.dirname(os.path.abspath(__file__))
-                for p_lao in [
-                    os.path.join(script_dir, "tesstrain_core/font/Phetsarath-Regular.ttf"),
-                    os.path.join(script_dir, "fonts/Phetsarath-Regular.ttf"),
-                    "tesstrain_core/font/Phetsarath-Regular.ttf",
-                    "/usr/share/fonts/truetype/lao/Phetsarath_OT.ttf"
-                ]:
-                    if os.path.exists(p_lao):
-                        fallback_lao = ImageFont.truetype(p_lao, getattr(font, 'size', 36))
-                        break
-            except Exception:
-                pass
-
-            for alt_font in [sec_font, fallback_lao]:
-                if alt_font is not None and alt_font is not c_font:
-                    scratch, s_arr = _draw_cluster_and_realign(cluster, alt_font, canvas_h, scratch_w, padding, bg_color, fg_color)
-                    ink_cols = np.where(np.any(s_arr < (bg_color - 15), axis=0))[0]
-                    if ink_cols.size > 0:
-                        c_font = alt_font
-                        break
-
-        if ink_cols.size == 0:
-            continue
-
-        cluster_ink_w = int(ink_cols[-1]) + 1
-        cluster_ink_l = int(ink_cols[0])
-
-        box_left = int(x - cluster_ink_l)
-        box_right = min(canvas_w, box_left + cluster_ink_w)
-        if box_left < 0 or box_left >= canvas_w or box_right <= box_left:
-            continue
-            
-        crop = scratch.crop((0, 0, box_right - box_left, canvas_h))
-        # Composite using minimum so white background in the bounding box crop never clips/overwrites neighboring dark ink
-        canvas_slice = np.array(canvas.crop((box_left, 0, box_right, canvas_h)))
-        blended = np.minimum(canvas_slice, np.array(crop))
-        canvas.paste(Image.fromarray(blended), (box_left, 0))
-
-        # Advance x using chosen font's designed advance width plus proportional letter spacing (tracking)
-        # to ensure that adjacent characters (such as ຽ and ງ) do not collide or merge when thickened/blurred.
-        try:
-            letter_spacing = max(3, int(round(getattr(c_font, 'size', 36) * 0.10)))
-            ink_w = (cluster_ink_w - cluster_ink_l)
-            raw_len = int(round(c_font.getlength(cluster)))
-            # Protect against PIL/FreeType unshaped OpenType mark table overflow (e.g. returning 1565px for stacked diacritics in phetsarath_ot.ttf)
-            max_sane_adv = max(ink_w * 2 + 15, int(round(getattr(c_font, 'size', 36) * 1.5)))
-            if raw_len > max_sane_adv or raw_len < 0:
-                raw_len = ink_w + 4
-            adv = max(raw_len, ink_w + 2) + letter_spacing
-        except Exception:
-            adv = (cluster_ink_w - cluster_ink_l) + 5
-        x += adv
-
-    # Find actual ink bounding box
-    arr = np.array(canvas)
-    threshold = bg_color - 15
-    ink_mask = arr < threshold
-
-    rows_with_ink = np.any(ink_mask, axis=1)
-    cols_with_ink = np.any(ink_mask, axis=0)
-
-    if rows_with_ink.any() and cols_with_ink.any():
-        r_min = int(np.where(rows_with_ink)[0][0])
-        r_max = int(np.where(rows_with_ink)[0][-1])
-        c_min = int(np.where(cols_with_ink)[0][0])
-        c_max = int(np.where(cols_with_ink)[0][-1])
-
-        left   = max(0, c_min - padding)
-        top    = max(0, r_min - padding)
-        right  = min(canvas_w, c_max + padding + 1)
-        bottom = min(canvas_h, r_max + padding + 1)
-        img = canvas.crop((left, top, right, bottom))
-    else:
-        img = Image.new('L', (max(len(text) * 10, 10), canvas_h), bg_color)
-
-    return img
-
+    width = int(x) + margin
+    canvas = np.full((canvas_h, width), bg_color, dtype=np.uint8)
+    for left, piece in pieces:
+        l0 = max(0, left)
+        r0 = min(width, left + piece.shape[1])
+        if r0 > l0:
+            canvas[:, l0:r0] = np.minimum(canvas[:, l0:r0], piece[:, l0 - left:r0 - left])
+    return Image.fromarray(canvas)
 
 
 # ============================================================================
@@ -410,10 +412,25 @@ def add_blur(img, radius=1.0):
     return img.filter(ImageFilter.GaussianBlur(radius=radius))
 
 
+def _background_level(img):
+    """Median of the border pixels: the paper colour to fill new areas with."""
+    arr = np.asarray(img)
+    border = np.concatenate([arr[0], arr[-1], arr[:, 0], arr[:, -1]])
+    return int(np.median(border))
+
+
 def random_rotation(img, max_angle=2.0):
-    """Slight random rotation."""
+    """Slight random rotation (skew), filled with the image's own background.
+
+    The angle is capped so the line's vertical drift is at most its own height:
+    a long line rotated by a few degrees would otherwise become mostly empty
+    space and shrink the text when the trainer rescales it to a fixed height.
+    """
+    w, h = img.size
+    max_angle = min(max_angle, math.degrees(math.atan(h / max(w, 1))))
     angle = random.uniform(-max_angle, max_angle)
-    return img.rotate(angle, resample=Image.BICUBIC, expand=True, fillcolor=255)
+    return img.rotate(angle, resample=Image.BICUBIC, expand=True,
+                      fillcolor=_background_level(img))
 
 
 def random_scale(img, scale_range=(0.9, 1.1)):
@@ -458,7 +475,8 @@ def random_perspective(img, distortion=0.05):
     ]
     # Find perspective coefficients
     coeffs = _find_perspective_coeffs(pts2, pts1)
-    return img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BICUBIC, fillcolor=255)
+    return img.transform((w, h), Image.PERSPECTIVE, coeffs, Image.BICUBIC,
+                         fillcolor=_background_level(img))
 
 
 def _find_perspective_coeffs(src, dst):
@@ -489,11 +507,12 @@ def add_background_texture(img, prob=0.3):
 
 def augment_image(img, noise_prob=0.3, blur_prob=0.3, augment_prob=0.5,
                   noise_intensity=0.04, blur_radius=0.9,
-                  brightness_max=20.0, contrast_max=0.2, morph_prob=0.3):
+                  brightness_max=20.0, contrast_max=0.2, morph_prob=0.3,
+                  rotation_max_angle=1.5):
     """Apply random augmentations to an image."""
     # Always-optional augmentations
-    if random.random() < augment_prob:
-        img = random_rotation(img, max_angle=1.5)
+    if rotation_max_angle > 0 and random.random() < augment_prob:
+        img = random_rotation(img, max_angle=rotation_max_angle)
     if random.random() < augment_prob:
         img = random_brightness_contrast(img, 
               brightness_range=(-brightness_max, brightness_max),
@@ -745,30 +764,32 @@ _AUGMENTATION_PRESETS = {
 }
 
 
+_BASE_AUG_KEYS = ('noise_prob', 'blur_prob', 'augment_prob', 'noise_intensity',
+                  'blur_radius', 'brightness_max', 'contrast_max', 'morph_prob')
+
+
+def preset_base_params(preset_name):
+    """The augment_image() keyword arguments a preset sets."""
+    p = _AUGMENTATION_PRESETS[preset_name]
+    return {k: p[k] for k in _BASE_AUG_KEYS}
+
+
 def apply_preset_augmentation(img, preset_name):
     """
     Apply a named augmentation preset to a PIL image.
-    Runs base augment_image() first, then applies real-world augmentations
-    (JPEG, illumination, ink color, paper texture, scan noise).
+    Runs base augment_image() first (without rotation), then the real-world
+    augmentations, then one final rotation with the preset's angle.
     """
     if preset_name not in _AUGMENTATION_PRESETS:
         raise ValueError(f"Unknown preset '{preset_name}'. "
                          f"Choose from: {list(_AUGMENTATION_PRESETS.keys())}")
+    img = augment_image(img, rotation_max_angle=0, **preset_base_params(preset_name))
+    return apply_realworld_augmentations(img, preset_name)
 
+
+def apply_realworld_augmentations(img, preset_name):
+    """Paper texture, uneven lighting, coloured ink, JPEG, scan noise, then skew."""
     p = _AUGMENTATION_PRESETS[preset_name]
-
-    # 1. Base augmentations
-    img = augment_image(
-        img,
-        noise_prob=p['noise_prob'],
-        blur_prob=p['blur_prob'],
-        augment_prob=p['augment_prob'],
-        noise_intensity=p['noise_intensity'],
-        blur_radius=p['blur_radius'],
-        brightness_max=p['brightness_max'],
-        contrast_max=p['contrast_max'],
-        morph_prob=p['morph_prob'],
-    )
 
     # 2. Real-world augmentations
     if p.get('paper_texture_prob', 0) > 0 and random.random() < p['paper_texture_prob']:
@@ -915,92 +936,6 @@ def gpu_augment_batch(pil_images, device, noise_prob=0.3, blur_prob=0.3, augment
     return results
 
 
-def generate_batch_gpu(batch_items, device, noise_prob, blur_prob, augment_prob,
-                       noise_intensity, blur_radius, brightness_max, contrast_max, 
-                       morph_prob, to_lstmf, ext, output_dir):
-    """
-    Generate a batch of samples using GPU-accelerated augmentations.
-    1. Render all text lines on CPU (PIL)
-    2. Augment the batch on GPU (PyTorch)
-    3. Save results to disk
-    Returns number of samples generated.
-    """
-    pil_images = []
-    texts = []
-    names = []
-
-    for item in batch_items:
-        if len(item) == 6:
-            idx, text, font_paths, sec_font_paths, font_sizes, prefix = item
-        else:
-            idx, text, font_paths, font_sizes, prefix = item
-            sec_font_paths = []
-
-        for attempt in range(max(len(font_paths) + 3, 10)):
-            font_size = random.choice(font_sizes)
-            font_path = random.choice(font_paths)
-            try:
-                font = ImageFont.truetype(font_path, font_size)
-            except Exception:
-                font = ImageFont.load_default()
-
-            sec_font = None
-            if sec_font_paths:
-                sec_path = random.choice(sec_font_paths)
-                try:
-                    sec_font = ImageFont.truetype(sec_path, font_size)
-                except Exception:
-                    sec_font = font
-
-            img = render_text_line(text, font, sec_font=sec_font)
-            arr_test = np.array(img)
-            if np.any(arr_test < 240):
-                break
-        pil_images.append(img)
-        texts.append(text)
-        names.append(f"{prefix}_{idx:07d}")
-
-    # GPU augmentation
-    if noise_prob > 0 or blur_prob > 0 or augment_prob > 0:
-        pil_images = gpu_augment_batch(pil_images, device, noise_prob, blur_prob, augment_prob,
-                                       noise_intensity, blur_radius, brightness_max, contrast_max, 
-                                       morph_prob)
-
-    # CPU rotation & perspective (these change dimensions, harder to batch)
-    for i in range(len(pil_images)):
-        if augment_prob > 0 and random.random() < augment_prob:
-            pil_images[i] = random_rotation(pil_images[i], max_angle=1.5)
-        if augment_prob > 0 and random.random() < augment_prob * 0.5:
-            pil_images[i] = random_perspective(pil_images[i], distortion=0.03)
-        if augment_prob > 0 and random.random() < augment_prob * 0.5:
-            pil_images[i] = random_scale(pil_images[i], scale_range=(0.93, 1.07))
-
-    # Save
-    for i, (img, text, name) in enumerate(zip(pil_images, texts, names)):
-        img_path = os.path.join(output_dir, f"{name}.{ext}")
-        gt_path = os.path.join(output_dir, f"{name}.gt.txt")
-
-        if ext == 'tif':
-            img.save(img_path, format='TIFF', compression='tiff_lzw')
-        elif ext == 'png':
-            img.save(img_path, format='PNG')
-        elif ext == 'jpg' or ext == 'jpeg':
-            img.convert('RGB').save(img_path, format='JPEG', quality=95)
-        else:
-            img.save(img_path)
-
-        with open(gt_path, 'w', encoding='utf-8') as f:
-            f.write(text)
-
-        if to_lstmf:
-            lstmf_path = os.path.join(output_dir, f"{name}.lstmf")
-            lstmf_data = image_to_lstmf(img, text, name)
-            with open(lstmf_path, 'wb') as f:
-                f.write(lstmf_data)
-
-    return len(pil_images)
-
-
 # ============================================================================
 #  .lstmf Writer
 # ============================================================================
@@ -1094,76 +1029,111 @@ def image_to_lstmf(img, text, filename, render_text=None, page_num=0):
 
 
 # ============================================================================
-#  Worker for parallel generation
+#  Sample generation (shared by the CPU and GPU paths)
 # ============================================================================
 
-def generate_sample(args_tuple):
-    """Generate a single sample (called by multiprocessing Pool)."""
-    if len(args_tuple) == 17:
-        (idx, text, font_paths, sec_font_paths, font_sizes, output_dir, noise_prob,
-         blur_prob, augment_prob, noise_intensity, blur_radius, 
-         brightness_max, contrast_max, morph_prob, to_lstmf, prefix, ext) = args_tuple
-    else:
-        (idx, text, font_paths, font_sizes, output_dir, noise_prob,
-         blur_prob, augment_prob, noise_intensity, blur_radius, 
-         brightness_max, contrast_max, morph_prob, to_lstmf, prefix, ext) = args_tuple
-        sec_font_paths = []
+_CFG = {}
 
-    # Random font and size with retry if rendering produces blank image
-    for attempt in range(max(len(font_paths) + 3, 10)):
-        font_size = random.choice(font_sizes)
-        font_path = random.choice(font_paths)
-        try:
-            font = ImageFont.truetype(font_path, font_size)
-        except Exception:
-            font = ImageFont.load_default()
 
-        sec_font = None
-        if sec_font_paths:
-            sec_path = random.choice(sec_font_paths)
-            try:
-                sec_font = ImageFont.truetype(sec_path, font_size)
-            except Exception:
-                sec_font = font
+def _init_worker(cfg):
+    """Pool initializer: share the generation config (corpus, fonts, params)."""
+    global _CFG
+    _CFG = cfg
 
-        img = render_text_line(text, font, sec_font=sec_font)
-        arr_test = np.array(img)
-        if np.any(arr_test < 240):
-            break
 
-    # Augment
-    img = augment_image(img, noise_prob=noise_prob, blur_prob=blur_prob,
-                        augment_prob=augment_prob, noise_intensity=noise_intensity,
-                        blur_radius=blur_radius, brightness_max=brightness_max,
-                        contrast_max=contrast_max, morph_prob=morph_prob)
+def _seed_sample(idx):
+    """Seed each sample from (seed, idx): reproducible, and different in every
+    worker process (forked workers would otherwise repeat the same choices)."""
+    s = _CFG['seed'] * 1_000_003 + idx
+    random.seed(s)
+    np.random.seed(s % (2 ** 32))
 
-    # Filenames
-    name = f"{prefix}_{idx:07d}"
-    img_path = os.path.join(output_dir, f"{name}.{ext}")
-    gt_path = os.path.join(output_dir, f"{name}.gt.txt")
 
-    # Save Image
+def _render_sample(text):
+    """Render text with a random font and size.
+
+    If a font can't render the text faithfully, other fonts are tried, then other
+    corpus lines. Returns (image, text the image shows) or (None, text).
+    """
+    cfg = _CFG
+    for attempt in range(30):
+        if attempt and attempt % 10 == 0:
+            text = random.choice(cfg['lines'])
+        sec = random.choice(cfg['sec_font_paths']) if cfg['sec_font_paths'] else None
+        img = render_line(text, random.choice(cfg['font_paths']),
+                          random.choice(cfg['font_sizes']), sec_font_path=sec)
+        if img is not None:
+            return img, text
+    return None, text
+
+
+def _save_sample(img, text, name):
+    cfg = _CFG
+    out, ext = cfg['output_dir'], cfg['ext']
+    img_path = os.path.join(out, f"{name}.{ext}")
     if ext == 'tif':
         img.save(img_path, format='TIFF', compression='tiff_lzw')
-    elif ext == 'png':
-        img.save(img_path, format='PNG')
-    elif ext == 'jpg' or ext == 'jpeg':
+    elif ext == 'jpg':
         img.convert('RGB').save(img_path, format='JPEG', quality=95)
     else:
-        img.save(img_path)
-
-    # Save .gt.txt
-    with open(gt_path, 'w', encoding='utf-8') as f:
+        img.save(img_path, format='PNG')
+    with open(os.path.join(out, f"{name}.gt.txt"), 'w', encoding='utf-8') as f:
         f.write(text)
+    if cfg['to_lstmf']:
+        with open(os.path.join(out, f"{name}.lstmf"), 'wb') as f:
+            f.write(image_to_lstmf(img, text, name))
 
-    # Optionally save .lstmf
-    if to_lstmf:
-        lstmf_path = os.path.join(output_dir, f"{name}.lstmf")
-        lstmf_data = image_to_lstmf(img, text, name)
-        with open(lstmf_path, 'wb') as f:
-            f.write(lstmf_data)
 
+def generate_sample(task):
+    """Generate and save one sample (CPU path). Returns its name, or None if skipped."""
+    idx, text = task
+    _seed_sample(idx)
+    img, text = _render_sample(text)
+    if img is None:
+        return None
+    if _CFG['preset']:
+        img = apply_preset_augmentation(img, _CFG['preset'])
+    else:
+        img = augment_image(img, **_CFG['aug'])
+    name = f"{_CFG['prefix']}_{idx:07d}"
+    _save_sample(img, text, name)
     return name
+
+
+def generate_batch_gpu(tasks, device):
+    """Render on CPU, augment pixels on GPU, then geometric and real-world ops on CPU.
+
+    Returns the number of samples saved.
+    """
+    cfg = _CFG
+    imgs, texts, names = [], [], []
+    for idx, text in tasks:
+        _seed_sample(idx)
+        img, text = _render_sample(text)
+        if img is not None:
+            imgs.append(img)
+            texts.append(text)
+            names.append(f"{cfg['prefix']}_{idx:07d}")
+
+    aug = cfg['aug']
+    if aug['noise_prob'] > 0 or aug['blur_prob'] > 0 or aug['augment_prob'] > 0:
+        imgs = gpu_augment_batch(imgs, device, **aug)
+
+    p_aug = aug['augment_prob']
+    for i in range(len(imgs)):
+        # Presets rotate once at the end of apply_realworld_augmentations()
+        if not cfg['preset'] and p_aug > 0 and random.random() < p_aug:
+            imgs[i] = random_rotation(imgs[i], max_angle=1.5)
+        if p_aug > 0 and random.random() < p_aug * 0.5:
+            imgs[i] = random_perspective(imgs[i], distortion=0.03)
+        if p_aug > 0 and random.random() < p_aug * 0.5:
+            imgs[i] = random_scale(imgs[i], scale_range=(0.93, 1.07))
+        if cfg['preset']:
+            imgs[i] = apply_realworld_augmentations(imgs[i], cfg['preset'])
+
+    for img, text, name in zip(imgs, texts, names):
+        _save_sample(img, text, name)
+    return len(imgs)
 
 
 # ============================================================================
@@ -1301,7 +1271,7 @@ Examples:
     if not lines:
         print(f"Error: No valid lines in {args.corpus}")
         sys.exit(1)
-    print(f"  Corpus: {len(lines)} unique lines from {args.corpus}")
+    print(f"  Corpus: {len(lines)} lines from {args.corpus}")
 
     # Font sizes
     font_sizes = list(range(args.font_size_min, args.font_size_max + 1, 2))
@@ -1310,16 +1280,19 @@ Examples:
 
     # Font paths (validate they exist)
     font_paths = [f for f in args.font if os.path.exists(f)]
+    for f in args.font:
+        if not os.path.exists(f):
+            print(f"  Warning: font not found: {f}")
     if not font_paths:
-        # Try to find system fonts
+        # Fall back to system fonts that actually contain Lao glyphs
         import glob
-        sys_fonts = glob.glob('/usr/share/fonts/**/*.ttf', recursive=True)
-        if sys_fonts:
-            font_paths = sys_fonts[:3]
-            print(f"  No --font specified, using system fonts: {font_paths}")
-        else:
-            print("  Warning: No fonts found, using default (limited charset)")
-            font_paths = ['']
+        sys_fonts = sorted(glob.glob('/usr/share/fonts/**/*.ttf', recursive=True) +
+                           glob.glob('/Library/Fonts/**/*.ttf', recursive=True))
+        font_paths = [f for f in sys_fonts if _font_cmap(f) and font_covers(f, 'ກາ')][:3]
+        if not font_paths:
+            print("Error: no Lao font found. Pass one with --font (e.g. fonts/saysettha_ot.ttf).")
+            sys.exit(1)
+        print(f"  No --font specified, using system Lao fonts: {font_paths}")
 
     # If font_paths contains both Lao/primary fonts and Times/Roman/Latin-only fonts (e.g. from --font fonts/*),
     # separate them so primary font_paths only has Lao fonts and sec_font_paths gets the Latin/Roman fonts.
@@ -1349,6 +1322,28 @@ Examples:
             sec_font_paths = font_paths
     print(f"  Secondary Fonts: {len(sec_font_paths)} font(s) for numbers/symbols")
 
+    # How each primary font will be rendered
+    for fp in font_paths:
+        mode = ('HarfBuzz shaping' if font_shapes_correctly(fp)
+                else 'cluster fallback renderer (HarfBuzz unavailable or broken for this font)')
+        print(f"    {os.path.basename(fp)}: {mode}")
+    if _font_cmap(font_paths[0]) is None:
+        print("  Note: install fonttools (pip install fonttools) to skip glyphs a font lacks")
+
+    # Drop corpus lines containing characters no font can draw: their images
+    # would show boxes or gaps while the label still names the character.
+    all_fonts = font_paths + [f for f in sec_font_paths if f not in font_paths]
+    drawable = lambda ch: ch.isspace() or any(font_covers(f, ch) for f in all_fonts)
+    bad_chars = {ch for line in set(lines) for ch in line if not drawable(ch)}
+    if bad_chars:
+        before = len(lines)
+        lines = [l for l in lines if not any(ch in bad_chars for ch in l)]
+        print(f"  Dropped {before - len(lines)} corpus lines with characters no font can draw: "
+              f"{' '.join(sorted(bad_chars))[:120]}")
+        if not lines:
+            print("Error: no renderable lines left in the corpus.")
+            sys.exit(1)
+
     print(f"  Count: {args.count}")
     if args.preset:
         pdesc = _AUGMENTATION_PRESETS[args.preset]['_description']
@@ -1374,90 +1369,55 @@ Examples:
 
     # Resolve preset vs. manual augmentation params
     if args.preset:
-        # When using a preset in GPU mode, GPU handles base noise/blur/augment;
-        # the extra real-world ops (JPEG, paper texture, etc.) run on CPU per-image.
-        _p = _AUGMENTATION_PRESETS[args.preset]
-        _noise_prob      = _p['noise_prob']
-        _blur_prob       = _p['blur_prob']
-        _augment_prob    = _p['augment_prob']
-        _noise_intensity = _p['noise_intensity']
-        _blur_radius     = _p['blur_radius']
-        _brightness_max  = _p['brightness_max']
-        _contrast_max    = _p['contrast_max']
-        _morph_prob      = _p['morph_prob']
+        aug = preset_base_params(args.preset)
     else:
-        _noise_prob      = args.noise
-        _blur_prob       = args.blur
-        _augment_prob    = args.augment
-        _noise_intensity = args.noise_intensity
-        _blur_radius     = args.blur_radius
-        _brightness_max  = args.brightness_max
-        _contrast_max    = args.contrast_max
-        _morph_prob      = args.morph_prob
+        aug = dict(noise_prob=args.noise, blur_prob=args.blur, augment_prob=args.augment,
+                   noise_intensity=args.noise_intensity, blur_radius=args.blur_radius,
+                   brightness_max=args.brightness_max, contrast_max=args.contrast_max,
+                   morph_prob=args.morph_prob)
 
-    # Generate
+    cfg = dict(lines=lines, font_paths=font_paths, sec_font_paths=sec_font_paths,
+               font_sizes=font_sizes, output_dir=args.output_dir, ext=args.ext,
+               to_lstmf=args.to_lstmf, prefix=args.prefix, seed=args.seed,
+               preset=args.preset, aug=aug)
+    tasks = [(i, random.choice(lines)) for i in range(args.count)]
+
     t0 = time.time()
     done = 0
 
+    def report(n):
+        if n and n % 1000 == 0:
+            sps = n / (time.time() - t0)
+            print(f"  [{n:7d}/{args.count}] {sps:.0f} samples/sec  ETA: {(args.count - n) / max(sps, 1):.0f}s")
+
     if use_gpu:
-        # ----- GPU batched mode -----
         import torch
         device = torch.device('cuda')
-
-        # Build lightweight task list (no output_dir/probs, those are passed separately)
-        tasks = []
-        for i in range(args.count):
-            text = random.choice(lines)
-            tasks.append((i, text, font_paths, sec_font_paths, font_sizes, args.prefix))
-
+        _init_worker(cfg)
         bs = args.batch_size
         for start in range(0, len(tasks), bs):
-            batch_items = tasks[start:start + bs]
-            n = generate_batch_gpu(
-                batch_items, device,
-                noise_prob=_noise_prob, blur_prob=_blur_prob, augment_prob=_augment_prob,
-                noise_intensity=_noise_intensity, blur_radius=_blur_radius,
-                brightness_max=_brightness_max, contrast_max=_contrast_max,
-                morph_prob=_morph_prob,
-                to_lstmf=args.to_lstmf, ext=args.ext, output_dir=args.output_dir
-            )
-            done += n
+            done += generate_batch_gpu(tasks[start:start + bs], device)
             if done % 1000 < bs:
-                elapsed = time.time() - t0
-                sps = done / elapsed
-                eta = (args.count - done) / max(sps, 1)
-                print(f"  [{done:7d}/{args.count}] {sps:.0f} samples/sec  ETA: {eta:.0f}s")
-
+                report(done - done % 1000)
     else:
-        # ----- CPU multiprocessing mode -----
-        tasks = []
-        for i in range(args.count):
-            text = random.choice(lines)
-            tasks.append((i, text, font_paths, sec_font_paths, font_sizes, args.output_dir,
-                           _noise_prob, _blur_prob, _augment_prob, _noise_intensity,
-                           _blur_radius, _brightness_max, _contrast_max,
-                           _morph_prob, args.to_lstmf, args.prefix, args.ext))
-
-        workers = min(args.workers, args.count)
+        workers = max(1, min(args.workers, args.count))
         if workers > 1:
-            with multiprocessing.Pool(workers) as pool:
-                for name in pool.imap_unordered(generate_sample, tasks, chunksize=100):
-                    done += 1
-                    if done % 1000 == 0:
-                        elapsed = time.time() - t0
-                        sps = done / elapsed
-                        eta = (args.count - done) / sps
-                        print(f"  [{done:7d}/{args.count}] {sps:.0f} samples/sec  ETA: {eta:.0f}s")
+            with multiprocessing.Pool(workers, initializer=_init_worker, initargs=(cfg,)) as pool:
+                for name in pool.imap_unordered(generate_sample, tasks, chunksize=50):
+                    if name:
+                        done += 1
+                        report(done)
         else:
+            _init_worker(cfg)
             for task in tasks:
-                generate_sample(task)
-                done += 1
-                if done % 1000 == 0:
-                    elapsed = time.time() - t0
-                    print(f"  [{done:7d}/{args.count}] {done/elapsed:.0f} samples/sec")
+                if generate_sample(task):
+                    done += 1
+                    report(done)
 
     elapsed = time.time() - t0
-    print(f"\n  ✓ Generated {args.count} samples in {elapsed:.1f}s ({args.count/max(elapsed,0.01):.0f}/sec)")
+    print(f"\n  ✓ Generated {done} samples in {elapsed:.1f}s ({done/max(elapsed,0.01):.0f}/sec)")
+    if done < args.count:
+        print(f"  ⚠ Skipped {args.count - done} samples that no font could render faithfully")
     print(f"  Output: {args.output_dir}")
 
     # Count files

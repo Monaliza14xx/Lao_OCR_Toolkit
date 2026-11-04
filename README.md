@@ -37,6 +37,7 @@ Train custom Tesseract OCR models 10–50× faster using GPU acceleration. Drop-
 - [📝 Synthetic Data Generation](#-synthetic-data-generation)
   - [Augmentation Presets](#augmentation-presets---preset)
   - [Real-World Calibration Workflow](#real-world-calibration-workflow)
+  - [Document-Level Synthesis](#document-level-synthesis-closest-to-real-scans)
 - [📖 Detailed Usage](#-detailed-usage)
   - [Training](#training)
   - [Evaluation](#evaluation)
@@ -94,6 +95,12 @@ pip install onnx onnxruntime-gpu   # GPU
 
 # Training charts and live metrics
 pip install matplotlib tensorboard
+
+# Glyph-coverage checks in the synthetic data generator (recommended)
+pip install fonttools
+
+# Document workflow: line segmentation (scipy) and reading PDFs (pypdfium2)
+pip install scipy pypdfium2
 
 # Comparing against real Tesseract models (also needs the tesseract binary in PATH)
 pip install pytesseract
@@ -227,9 +234,21 @@ python3 gen_data_from_text.py --convert_only --ext png \
 ```
 
 #### How it works:
-1. **Text Rendering** (CPU): PIL renders text lines with random fonts/sizes.
-2. **Augmentation** (CPU or GPU): Applies noise, blur, rotation, perspective, contrast, erosion/dilation, paper texture.
-3. **Output**: Saves `.tif`/`.png`/`.jpg` + `.gt.txt` + optional `.lstmf`.
+1. **Label normalization**: each corpus line is put into standard Lao storage order (see below).
+2. **Text rendering** (CPU): each line is drawn with a random font and size. Lao runs use the `--font` fonts; digits, Latin and punctuation use `--sec_font` (Times-style fonts passed via `--font` are moved there automatically). All runs share one baseline.
+3. **Augmentation** (CPU or GPU): noise, blur, contrast, erosion, perspective, and with `--preset` also paper texture, uneven lighting, coloured ink, JPEG artifacts, scan noise and skew.
+4. **Output**: `.tif`/`.png`/`.jpg` + `.gt.txt` + optional `.lstmf`.
+
+#### Lao text handling
+
+| What | Why it matters for OCR training |
+|------|------|
+| **Standard character order.** Inside a cluster: consonant, ຼ, vowel marks (incl. ໍ), tone marks, then ຳ. So ນ້ຳ is stored as ນ + ້ + ຳ; ໍ + າ typed separately becomes ຳ; NFC; zero-width characters removed. | Labels match how real typed ground truth encodes the same words. |
+| **HarfBuzz shaping** (Pillow with libraqm) for fonts that pass a quick test with stacked marks (ຂຶ້ນ, ເຂົ້າ, ນ້ຳ…). | Tone marks sit above upper vowels and spacing is natural, as in printed documents. |
+| **Fallback renderer** for fonts whose HarfBuzz output is broken (e.g. `phetsarath_ot.ttf`) or when libraqm is missing. It draws one cluster at a time and pulls runaway marks back over their base. | Those fonts can still be used safely. The generator prints which renderer each font gets. |
+| **Fixed line box.** Images are cropped vertically to the font's ascent/descent (with random margins), not to the ink. | Text stays the same size after the trainer rescales lines to a fixed height, whether or not a line has upper/lower marks. |
+| **No mismatched labels.** With `fonttools` installed, a font missing any glyph of a line isn't used for it; lines no font can draw are dropped at startup; a line that would draw nothing for a character is re-rendered with another font. The canvas always fits the whole line. | Every image shows exactly its `.gt.txt`. |
+| **Per-sample random seed** (`--seed` + sample index). | Runs are reproducible and parallel workers don't repeat each other's choices. |
 
 #### Output Example:
 - `line_0001.png`: A 48px high image containing the text.
@@ -279,6 +298,8 @@ Each preset controls the same set of parameters. Below is the full breakdown sho
 | `bg_std` | 0.0 | 4.0 | 12.0 | **6.4** | Background pixel std (controls grain intensity) |
 | `uneven_illumination_prob` | 0.0 | 0.20 | 0.50 | **0.30** | Probability of scanner light-falloff gradient |
 | `colored_ink_prob` | 0.0 | 0.01 | 0.03 | **0.02** | Probability of converting ink to a non-black color |
+
+> Skew is capped so a line's vertical drift never exceeds its own height; otherwise long lines would turn into mostly empty space once rescaled.
 
 > **`real-match` design rationale:** Every value is derived from measurements on 50 real Lao administrative document lines:
 > - `noise_intensity = 0.046` ← measured noise σ = 11.75 / 255
@@ -387,6 +408,70 @@ Outputs `data/lao-augmented-v2/validation/`:
 - `kl_divergence.json` — machine-readable scores for CI integration
 
 > **Recommended threshold:** KL divergence < 0.15 (🟢 Good) for background, contrast, and noise. Values > 0.5 indicate a significant remaining domain gap.
+
+
+---
+
+### Document-Level Synthesis (closest to real scans)
+
+Line-by-line rendering (`gen_data_from_text.py`) gives clean, tightly cropped lines. Real OCR input is different: lines are cut out of scanned pages by a segmenter, so they carry the segmenter's habits (margins, leftover skew, slivers of neighbouring lines, stamps and signatures overlapping text) and they are mostly long lines. The document workflow reproduces that by sending **real scans and synthetic pages through the same layout analysis and line cropping**.
+
+```
+real scans (PDF/JPG) ──► segment_document.py ──► real line crops + Tesseract draft text
+                              │  (deskew → layout analysis → line crops)
+synthetic pages ─────► gen_documents.py ──────► synthetic line crops + exact labels
+  (doc_synth: letter layout + scan simulation)
+                              ▼
+                    compare_line_stats.py  (is the synthetic data close to the real crops?)
+```
+
+#### Step 1 — Segment real documents into lines
+
+```bash
+python3 segment_document.py --input scans/ --output_dir data/real-lines
+```
+
+For each document: the straightened page, a layout preview (`page1_layout.png`: green = text lines in reading order, red = emblem/stamp/signature, blue = ruled lines), one image per line, and Tesseract's draft text in `*.ocr.txt`. Correct a draft and save it as `*.gt.txt` to turn the line into real ground truth.
+
+How the segmentation works (`tesstrain_core/doc_layout.py`):
+1. **Deskew** the page (projection-profile search, ±4°).
+2. **Connected components**, classified against the page's typical letter-body height: letters, marks (vowel/tone marks, dots), graphics (taller than 3 letter bodies), rules (long and thin).
+3. **Lines**: letters that overlap vertically and sit close together are chained; a wide gap starts a new line (left-aligned name vs right-aligned number on the same row).
+4. **Lao marks** join the nearest line above or below, whole — a stacked vowel + tone above a line reaches further than a mark below one, so they are never cut off or given to the wrong line.
+5. **Graphics** are excluded: dense big components (emblem) and clusters of red/blue ink (stamps, signatures). Red or blue *text* lines (a name, a stamped number) stay, and sparse frames (table grids) don't swallow the text inside them.
+
+#### Step 2 — Generate synthetic documents
+
+```bash
+python3 gen_documents.py --corpus data/lao-corpus.txt --output_dir data/lao-docs \
+    --font fonts/Phetsarath-Regular.ttf fonts/Phetsarath-Bold.ttf fonts/saysettha_ot.ttf \
+    --sec_font fonts/TimesNewerRoman-*.otf --count 2000 --workers 8 --to_lstmf
+```
+
+Each page is an A4 letter laid out like a Lao ministry letter, with random variation: emblem, national motto, ministry/department block, document number (sometimes stamped in red) and place/date (sometimes a handwritten blue day), bold title, `ເຖິງ:` / `ເລື່ອງ:` blocks with hanging indents, `- ອີງຕາມ` references, justified body paragraphs mixing Lao with Latin, digits, Lao digits, dates, times, phone numbers, e-mails and URLs (sometimes underlined), bold words, optional tables, a signature block with a round stamp and a pen signature overlapping the text, and a ruled footer.
+
+The page is then "scanned": skew, print blur, paper tint, uneven lighting, resolution loss, sensor noise, specks, optional photocopy look and JPEG. It is straightened and segmented by the **same code as step 1**, and each line crop is labelled with the words that lie completely inside it. Crops that cut through a word or contain no text are discarded, so labels are exact. `summary.json` reports how many lines were kept and dropped; `pages/` keeps the first pages with their layout previews.
+
+Defaults are calibrated on a real 300 dpi scan of a Lao ministry letter: body ≈ 12.4 pt, line pitch ≈ 1.35 × font size, margins ≈ 3.2 cm / 1.6 cm, page skew ≈ 1°, gray ink, clean white paper, JPEG, red stamp ≈ 7 % and blue pen ≈ 2.5 % of the ink. Use a corpus of real Lao sentences (phrases separated by spaces) so word spacing matches real text.
+
+Fonts whose HarfBuzz output is broken (e.g. `phetsarath_ot.ttf`) are skipped for whole pages; `Phetsarath-Regular.ttf` has the same design.
+
+#### Step 3 — Check the domain gap
+
+```bash
+python3 compare_line_stats.py --real data/real-lines --synthetic data/lao-docs data/lao-synth-ground-truth
+```
+
+| Property (p10 / median / p90) | Real letter | `gen_documents.py` | `gen_data_from_text.py` |
+|---|---|---|---|
+| Letter-body share of crop height | 0.35 / 0.42 / 0.56 | 0.33 / 0.38 / 0.49 | 0.25 / 0.33 / 0.44 |
+| Line length (width ÷ height) | 2.3 / 12.8 / 25.2 | 2.4 / 13.7 / 23.5 | 1.7 / 3.5 / 10.8 |
+| Paper level | 252 / 253 / 254 | 244 / 248 / 253 | 214 / 255 / 255 |
+| Ink level | 35 / 40 / 67 | 17 / 42 / 79 | 2 / 40 / 111 |
+
+*(Measured on one real document — add more real scans to calibrate more broadly.)*
+
+> **Privacy:** scanned letters contain names, signatures and phone numbers. Keep real crops in `data/` (git-ignored) and never publish them.
 
 
 ---
@@ -636,6 +721,9 @@ Lao_OCR_Toolkit/
 ├── gen_data_from_text.py       # Synthetic data generator (CPU/GPU) + 4 augmentation presets + .lstmf writer
 ├── build_augmented_corpus.py   # Enrich corpus from real GT + oversample rare chars
 ├── validate_augmentation.py    # KL divergence + gallery validation of augmented data
+├── segment_document.py         # Scanned PDF/images → deskew → layout analysis → line crops
+├── gen_documents.py            # Synthetic Lao letter pages → scan simulation → same line cropping
+├── compare_line_stats.py       # Real vs synthetic line statistics (domain gap check)
 ├── tesseract_tools.py          # Training plots · Tesseract model comparison · timing report
 ├── compare_cross.py            # Cross-compare original Tesseract vs fine-tuned (CSV)
 ├── compare_pt_vs_tess.py       # Tesseract (.traineddata) vs PyTorch (.pt) evaluation
@@ -653,6 +741,8 @@ Lao_OCR_Toolkit/
 │   ├── dataset.py              # .lstmf reader + PyTorch Dataset
 │   ├── metrics.py              # CTC decoding, CER/WER, Lao CoER
 │   ├── evaluate.py, recognize.py, export.py
+│   ├── doc_layout.py           # Deskew, layout analysis, Lao-aware line segmentation
+│   ├── doc_synth.py            # Synthetic letter layout + scan simulation
 │   ├── dawg.py                 # Word/number/punctuation DAWGs + n-gram LM
 │   ├── tesseract_transfer.py   # Load Tesseract LSTM weights into PyTorch
 │   ├── compare.py, inspection.py, projection.py, plotting.py   # Analysis & figures

@@ -15,6 +15,13 @@ pytesseract
 # Training chart generation
 matplotlib>=3.7.0
 
+# Synthetic data generator: skip fonts that lack a glyph for a line
+fonttools>=4.40
+
+# Document workflow (segment_document.py / gen_documents.py)
+scipy>=1.10
+pypdfium2>=4.0
+
 
 # ============================================================
 #  GPU – PyTorch with CUDA
