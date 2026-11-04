@@ -1,0 +1,29 @@
+# ============================================================
+#  tesstrain-gpu – Requirements
+# ============================================================
+#  Core (required)
+# ============================================================
+torch>=2.0.0
+numpy>=1.24.0
+Pillow>=9.0.0
+pytesseract
+
+# ============================================================
+#  Optional – Enhanced features
+# ============================================================
+
+# Training chart generation
+matplotlib>=3.7.0
+
+
+# ============================================================
+#  GPU – PyTorch with CUDA
+# ============================================================
+# For CUDA 11.8:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu118
+#
+# For CUDA 12.1:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# For CPU-only:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu

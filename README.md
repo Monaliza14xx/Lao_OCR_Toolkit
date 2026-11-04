@@ -17,15 +17,16 @@ Train custom Tesseract OCR models 10–50× faster using GPU acceleration. Drop-
 | **GPU Training** | 10–50× faster than Tesseract's `lstmtraining` |
 | **PyTorch LSTM** | Standard PyTorch nn.LSTM with CTC loss |
 | **Optimizers** | Adam and SGD + Momentum supported |
+| **VGSL Architectures** | Tesseract VGSL strings plus PyTorch-only layers: BatchNorm, Dropout, Dense, attention height-collapse (`Atys`, `Matys`, `Hybys`), self-attention and Conformer blocks |
+| **Tesseract Transfer** | Warm-start from a Tesseract `.traineddata` / `.lstm` model |
 | **Beam Search + DAWG** | Dictionary-constrained decoding with word/number/punctuation DAWGs |
 | **Language Model** | N-gram LM (char trigrams + word bigrams) for beam search |
 | **Page Segmentation** | PSM 3, 6, 7, 13 for full-page and single-line OCR |
-| **Unicode Recoder** | NFC/NFD normalization, ligature decomposition |
 | **ONNX Export** | Cross-platform deployment with ONNX Runtime |
 | **Synthetic Data** | Generate training images with GPU-accelerated augmentations + calibrated presets |
-| **Real-World Calibration** | Analyze real scanned documents → auto-derive augmentation params to close the domain gap |
+| **Real-World Calibration** | Enrich the corpus from real ground truth and check the synthetic-vs-real gap with KL divergence |
+| **Lao Error Analysis** | Component Error Rate (CoER) per Lao character group: tones, upper/lower vowels, consonants… |
 | **Character Analytics** | Analyze character frequencies, Unicode codepoints, and categories |
-| **ICU Segmentation** | Accurate WER for non-space-delimited languages (Lao, Thai, CJK) |
 
 ---
 
@@ -51,7 +52,9 @@ Train custom Tesseract OCR models 10–50× faster using GPU acceleration. Drop-
   - [tesstrain_core/compare.py — PyTorch Model Comparison](#tesstrain_corecomparepy)
   - [compare_cross.py — Original vs Fine-tuned Cross-Comparison](#compare_crosspy)
 - [🐛 Troubleshooting](#-troubleshooting)
+- [📄 Command Reference](#-command-reference)
 - [🛠️ Utilities](#️-utilities)
+- [⚠️ Known Limitations](#️-known-limitations)
 
 ---
 
@@ -60,8 +63,8 @@ Train custom Tesseract OCR models 10–50× faster using GPU acceleration. Drop-
 ### 1. Clone
 
 ```bash
-git clone https://github.com/your-username/tesstrain-gpu.git
-cd tesstrain-gpu
+git clone https://github.com/Monaliza14xx/Lao_OCR_Toolkit.git
+cd Lao_OCR_Toolkit
 ```
 
 ### 2. Install dependencies
@@ -92,9 +95,8 @@ pip install onnx onnxruntime-gpu   # GPU
 # Training charts and live metrics
 pip install matplotlib tensorboard
 
-# ICU word segmentation (for Lao/Thai/CJK WER)
-# Requires: apt install libicu-dev (Ubuntu) or brew install icu4c (macOS)
-pip install PyICU
+# Comparing against real Tesseract models (also needs the tesseract binary in PATH)
+pip install pytesseract
 ```
 
 ### 4. Verify installation
@@ -107,8 +109,8 @@ python3 -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda
 
 ```python
 # Everything is pre-installed on Colab!
-!git clone https://github.com/your-username/tesstrain-gpu.git
-%cd tesstrain-gpu
+!git clone https://github.com/Monaliza14xx/Lao_OCR_Toolkit.git
+%cd Lao_OCR_Toolkit
 
 # Verify GPU
 import torch
@@ -139,13 +141,14 @@ data/lao-ground-truth/
 Render images directly from a plain text corpus using the included script. This is the fastest way to bootstrap a new language or fine-tune an existing model on your specific domain's vocabulary.
 ```bash
 python3 gen_data_from_text.py \
-    --text corpus.txt \
+    --corpus corpus.txt \
     --output_dir data/lao-ground-truth \
-    --font "Noto Sans Lao" \
+    --font fonts/Phetsarath-Regular.ttf fonts/saysettha_ot.ttf \
     --count 10000 \
-    --augment
+    --preset scan-mild \
+    --to_lstmf
 ```
-*(See the [Synthetic Data Generation](#synthetic-data-generation-gen_data_from_textpy) section for advanced options like multi-font, noise, and blur.)*
+*(See the [Synthetic Data Generation](#-synthetic-data-generation) section for advanced options like multi-font, noise, and blur.)*
 
 #### Way 3: Migrate from original Tesseract training
 If you already have a `data/<model_name>-ground-truth/` folder containing `.tif` and `.gt.txt` pairs from using the original `tesstrain` Makefile, you can reuse it entirely without any changes!
@@ -243,7 +246,7 @@ The `--preset` flag applies a named bundle of augmentation parameters calibrated
 | `clean` | No augmentation — pure synthetic render | Ablation / baseline comparison |
 | `scan-mild` | Light scan degradation | Good-quality scanned documents |
 | `scan-heavy` | Heavy degradation: high noise, blur, JPEG | Aged or low-quality scans |
-| `real-match` | **Calibrated from real document analysis** | When you have run `analyze_real_data.py` on your actual target documents |
+| `real-match` | **Calibrated from real document analysis** | Target documents similar to Lao administrative scans (values below) |
 
 ```bash
 # Baseline (no augmentation)
@@ -277,7 +280,7 @@ Each preset controls the same set of parameters. Below is the full breakdown sho
 | `uneven_illumination_prob` | 0.0 | 0.20 | 0.50 | **0.30** | Probability of scanner light-falloff gradient |
 | `colored_ink_prob` | 0.0 | 0.01 | 0.03 | **0.02** | Probability of converting ink to a non-black color |
 
-> **`real-match` design rationale:** Every value is derived from `analyze_real_data.py` measurements on 50 real Lao administrative document lines:
+> **`real-match` design rationale:** Every value is derived from measurements on 50 real Lao administrative document lines:
 > - `noise_intensity = 0.046` ← measured noise σ = 11.75 / 255
 > - `blur_radius = 0.0` ← all 50 real images classified as **sharp** (Laplacian variance > 500)
 > - `brightness_max = 7.7`, `contrast_max = 0.138` ← calibrated from Michelson contrast gap (real: 0.773 vs synthetic: 0.85)
@@ -332,20 +335,11 @@ Each preset runs augmentations in this fixed order (later steps depend on earlie
 
 ### Real-World Calibration Workflow
 
-If you have a set of real scanned document line images (`.jpg` + `.gt.txt` pairs), you can automatically measure the domain gap and calibrate `gen_data_from_text.py` to close it.
+If you have a set of real scanned document line images (`.jpg` + `.gt.txt` pairs), you can use them to make the synthetic data look more like your target documents.
 
 #### Step 1 — Profile your real documents
 
-```bash
-cd /path/to/your-real-documents
-python3 analyze_real_data.py --data_dir . --output_dir ./analysis_output
-```
-
-Outputs:
-- `analysis_output/analysis_report.md` — full metrics table (contrast, noise σ, background, skew, char frequency, line-type distribution)
-- `analysis_output/augmentation_params.json` — calibrated parameters ready to copy into a preset
-- `analysis_output/full_analysis.json` — machine-readable full analysis
-- `analysis_output/*.png` — distribution plots (dimensions, quality metrics, character frequency)
+The profiling script used to measure the real documents is **not included** in this repository. Its measurements (noise σ, background mean/std, contrast, skew) are already built into `--preset real-match`, so you can start at Step 2. If you profile your own documents, put the values in a new entry of `_AUGMENTATION_PRESETS` in `gen_data_from_text.py`.
 
 #### Step 2 — Enrich your training corpus
 
@@ -367,9 +361,9 @@ python3 build_augmented_corpus.py \
 python3 gen_data_from_text.py \
     --corpus data/lao-corpus-enriched.txt \
     --output_dir data/lao-augmented-v2 \
-    --font tesstrain_core/font/Phetsarath-Regular.ttf \
-           tesstrain_core/font/Phetsarath-Bold.ttf \
-           tesstrain_core/font/phetsarath_ot.ttf \
+    --font fonts/Phetsarath-Regular.ttf \
+           fonts/Phetsarath-Bold.ttf \
+           fonts/phetsarath_ot.ttf \
     --font_size_min 28 --font_size_max 72 \
     --count 50000 \
     --preset real-match \
@@ -382,9 +376,10 @@ python3 gen_data_from_text.py \
 python3 validate_augmentation.py \
     --real_dir /path/to/your-real-documents \
     --synth_dir data/lao-augmented-v2 \
-    --analysis_params /path/to/analysis_output/augmentation_params.json \
     --n_synth_sample 500
 ```
+
+`--analysis_params path/to/augmentation_params.json` is optional; pass it only if you have your own profiling output.
 
 Outputs `data/lao-augmented-v2/validation/`:
 - `validation_report.md` — KL divergence scores (target: all < 0.5) with pass/fail grade
@@ -436,15 +431,15 @@ python3 torch_train.py training --model_name lao \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--model_name` | *required* | Name for the model (e.g., `lao`, `eng`) |
-| `--net_spec` | VGSL string | Network architecture in VGSL format |
+| `--model_name` | `foo` | Name for the model (e.g., `lao`, `eng`); sets the `data/<model_name>/` output folder |
+| `--net_spec` | `[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]` | Network architecture in VGSL format |
 | `--optimizer` | `Adam` | Optimizer choice (`Adam` or `SGD`) |
 | `--learning_rate` | `0.002` | Learning rate |
 | `--momentum` | `0.9` | Momentum value (if `--optimizer SGD`) |
 | `--weight_decay` | `0.0` | Weight decay / L2 penalty |
 | `--batch_size` | `64` | Training batch size |
 | `--max_iterations` | `10000` | Maximum training steps |
-| `--epochs` | — | Train for N epochs (alternative to iterations) |
+| `--epochs` | `0` (off) | Train for N epochs (overrides `--max_iterations`) |
 | `--target_error_rate` | `0.01` | Stop early when CER reaches this value |
 | `--debug_interval` | `100` | Print metrics every N iterations |
 | `--start_model` | — | Path to checkpoint for fine-tuning |
@@ -464,7 +459,7 @@ tensorboard --logdir data/lao/tensorboard
 Open your browser to `http://localhost:6006` to watch your model learn.
 
 **Training Plots (Static)**
-At the end of training, a `<model>_plot.png` chart is automatically generated in your model directory showing Loss, CER, WER, execution speeds, and character frequencies over time. You can also manually generate this at any time:
+At the end of training, a `training_plot.png` chart is automatically generated in your model directory showing Loss, CER, WER, execution speeds, and character frequencies over time. You can also manually generate this at any time:
 ```bash
 python3 torch_train.py plot --model_name lao
 ```
@@ -474,13 +469,17 @@ python3 torch_train.py plot --model_name lao
 ```
 ──────────────────────────────────────────────────────────────────────
   Iteration    500/10000  │  Epoch 2  │  312 samples/sec
-  Loss=2.1456  avg=2.3102  │  CER=0.4521  WER=0.7834  │  Mean RMS=0.043521
-  GPU: 2.1 GB / 14.7 GB  (peak: 3.8 GB)  │  ETA: 12:34
-──────────────────────────────────────────────────────────────────────
-  GT:   ສາທາລະນະລັດ ປະຊາທິປະໄຕ ປະຊາຊົນລາວ
-  Pred: ສາທາລະນະລັດ ປະຊາທີປະໄຕ ປະຊາຊົນລາວ
+  Loss=2.1456  avg=2.3102  │  CER=0.4521  WER=0.7834  Acc=12.50%  │  Mean RMS=0.043521
+  Eval — Loss=2.4012  CER=0.4810  WER=0.8020  Acc=10.94%
+  GPU=2.10GB (peak=3.80GB)
+  ┌─── Sample Predictions ───
+  │ [1] GT:   ສາທາລະນະລັດ ປະຊາທິປະໄຕ ປະຊາຊົນລາວ
+  │     Pred: ສາທາລະນະລັດ ປະຊາທີປະໄຕ ປະຊາຊົນລາວ
+  └────────────────────────
 ──────────────────────────────────────────────────────────────────────
 ```
+
+Training CER/WER are measured on the current batch; the `Eval` line appears every 5 × `--debug_interval` steps. `<model>_best.pt` is saved whenever eval CER improves (or train CER, if there is no validation list). Metrics are written to `data/<model>/training.log` (CSV).
 
 ### Evaluation
 
@@ -489,6 +488,8 @@ python3 torch_train.py evaluation --model_name lao --batch_size 32
 ```
 
 > **Note:** The architecture is automatically read from the checkpoint, so evaluation always works even if the checkpoint was trained with a custom `--net_spec`.
+>
+> **Tip:** Use `--batch_size 1` when you need results that don't depend on batch composition (see [Known Limitations](#️-known-limitations)). Evaluation always uses greedy decoding.
 
 ### Recognition (Inference)
 
@@ -615,21 +616,50 @@ python3 torch_train.py plot --model_name lao
 python3 torch_train.py clean --model_name lao
 ```
 
+`run.sh` wraps the most common analysis runs (model names inside it match the author's experiments; edit them for yours):
+
+```bash
+./run.sh plots        # Tesseract training-log plots         → plots/
+./run.sh compare      # Tesseract model comparison           → tesseract_data/tesseract_comparison/
+./run.sh benchmark    # Tesseract vs PyTorch benchmark suite → benchmark_output/
+./run.sh tensorboard  # Export Tesseract logs to TensorBoard → runs/
+./run.sh all          # plots + compare + PyTorch compare + TensorBoard
+```
+
 ---
 
 ## 📁 Project Structure
 
 ```
-tesstrain-gpu/
-├── torch_train.py              # CLI: 11 subcommands (train, evaluate, recognize, …)
-├── gen_data_from_text.py       # Synthetic data generator (CPU/GPU) + 4 augmentation presets
-├── analyze_real_data.py        # Phase 1: Profile real scanned documents → calibrated aug params
-├── build_augmented_corpus.py   # Phase 3: Enrich corpus from real GT + oversample rare chars
-├── validate_augmentation.py    # Phase 3: KL divergence + gallery validation of augmented data
-├── tesseract_tools.py          # Training plots · model comparison · timing report
+Lao_OCR_Toolkit/
+├── torch_train.py              # CLI: 16 subcommands (training, evaluation, recognize, export, …)
+├── gen_data_from_text.py       # Synthetic data generator (CPU/GPU) + 4 augmentation presets + .lstmf writer
+├── build_augmented_corpus.py   # Enrich corpus from real GT + oversample rare chars
+├── validate_augmentation.py    # KL divergence + gallery validation of augmented data
+├── tesseract_tools.py          # Training plots · Tesseract model comparison · timing report
 ├── compare_cross.py            # Cross-compare original Tesseract vs fine-tuned (CSV)
+├── compare_pt_vs_tess.py       # Tesseract (.traineddata) vs PyTorch (.pt) evaluation
+├── compared_model.py           # Manual comparison of compiled Tesseract models
+├── benchmark.py                # Full Tesseract-vs-PyTorch benchmark suite (run.sh benchmark)
+├── run_benchmark.py            # Dependency-checking runner for compare_pt_vs_tess.py
+├── log_to_tensorboard.py       # Export Tesseract training logs to TensorBoard
+├── plot_training.py            # Plots from Tesseract LSTM training logs
+├── plot_confusion_matrix.py, generate_projection_profile.py   # Figures
+├── run.sh                      # Shortcut launcher (plots, compare, benchmark, …)
+├── fonts/                      # Lao (Phetsarath, Saysettha) and Latin fonts for synthetic data
 ├── tesstrain_core/
-│   └── compare.py              # PyTorch model comparison + diagnostic plots
+│   ├── model.py                # VGSL spec → nn.Sequential (incl. attention/Conformer layers)
+│   ├── training.py             # GPU training loop (CTC loss, checkpoints, TensorBoard)
+│   ├── dataset.py              # .lstmf reader + PyTorch Dataset
+│   ├── metrics.py              # CTC decoding, CER/WER, Lao CoER
+│   ├── evaluate.py, recognize.py, export.py
+│   ├── dawg.py                 # Word/number/punctuation DAWGs + n-gram LM
+│   ├── tesseract_transfer.py   # Load Tesseract LSTM weights into PyTorch
+│   ├── compare.py, inspection.py, projection.py, plotting.py   # Analysis & figures
+│   └── command_utils.py, utils.py
+├── LSTM_WEIGHTS.md             # Why PyTorch LSTMs have slightly more parameters than Tesseract's
+├── metrics.md                  # How CER / WER / CoER are computed
+├── THESIS_REPORT.md            # Research write-up
 ├── requirements.txt
 ├── LICENSE
 └── README.md
@@ -639,14 +669,15 @@ data/
 ├── <model_name>/
 │   ├── <model>_best.pt             # Best checkpoint (lowest CER)
 │   ├── <model>_final.pt            # Final checkpoint
-│   ├── <model>.traineddata         # Tesseract binary model
-│   ├── <model>_final.traineddata   # Compiled Tesseract model (for comparison)
+│   ├── <model>_checkpoint_<N>.pt   # Periodic checkpoints (--save_interval)
+│   ├── <model>.traineddata         # Proto model (only if `proto-model` ran with Tesseract tools)
 │   ├── <model>.onnx                # ONNX model
 │   ├── <model>_model_info.json     # Model metadata
-│   ├── training.log                # Training log (with timestamps if segmented)
+│   ├── training.log                # Training metrics (CSV)
 │   ├── training_plot.png           # Error-rate chart
 │   ├── charset.json                # Character → index mapping
 │   ├── config.json                 # Training configuration
+│   ├── tensorboard/                # TensorBoard event files
 │   └── unicharset                  # Tesseract unicharset
 ├── lao-augmented-v2/               # Generated by gen_data_from_text.py --preset real-match
 │   └── validation/                 # Generated by validate_augmentation.py
@@ -664,15 +695,6 @@ data/
 ├── tesseract_comparison/           # tesseract_tools.py compare outputs
 └── cross_comparison/               # compare_cross.py outputs
 
-# Generated by analyze_real_data.py (stored alongside real documents):
-<real-documents-dir>/analysis_output/
-├── analysis_report.md          # Full domain gap report
-├── augmentation_params.json    # Calibrated params for --preset real-match
-├── full_analysis.json          # Machine-readable per-image stats
-├── dimensions.png              # Height/width distribution plots
-├── quality_metrics.png         # Noise/contrast/sharpness distribution
-└── char_frequency.png          # Top-30 character frequency bar chart
-
 plots/                              # tesseract_tools.py training plots
 ```
 
@@ -686,10 +708,10 @@ plots/                              # tesseract_tools.py training plots
 │                                                                     │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────┐  │
 │  │  .gt.txt  │    │  .lstmf  │    │ PyTorch  │    │   Export     │  │
-│  │  .tif     │──▸ │  lists   │──▸ │ Training │──▸ │.traineddata  │  │
-│  │  images   │    │          │    │  (GPU)   │    │.onnx         │  │
+│  │  .tif     │──▸ │  lists   │──▸ │ Training │──▸ │   .onnx      │  │
+│  │  images   │    │          │    │  (GPU)   │    │              │  │
 │  └──────────┘    └──────────┘    └──────────┘    └──────────────┘  │
-│   unicharset       lists          training        traineddata      │
+│   unicharset       lists          training        export           │
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Inference Pipeline                                                 │
@@ -760,17 +782,17 @@ Notes:
 ### Network Architecture (VGSL)
 
 ```
-Default: [1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx512 O1c###]
+Default: [1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]
 
 Layer breakdown:
   [1,48,0,1]  Input: batch=1, height=48, width=variable, depth=1 (grayscale)
   Ct3,3,16    Conv: 3×3 kernel, 16 filters, tanh activation
   Mp3,3       MaxPool: 3×3
-  Lfys64      LSTM: forward-y (vertical), 64 units, with sigmoid gate
-  Lfx96       LSTM: forward-x (horizontal), 96 units
+  Lfys64      LSTM down each column (y), keeps the last state → collapses height into a 1-D sequence
+  Lfx96       LSTM: forward-x (left-to-right), 96 units
   Lrx96       LSTM: reverse-x (right-to-left), 96 units
-  Lfx512      LSTM: forward-x, 512 units
-  O1c###      Output: 1D softmax, ### = num_classes (auto-filled)
+  Lfx384      LSTM: forward-x, 384 units
+  O1c###      Output: linear layer to num_classes (### auto-filled); CTC log-softmax is applied in training
 ```
 
 #### VGSL Token Reference
@@ -778,14 +800,24 @@ Layer breakdown:
 | Token | Description | Stage | Example |
 |-------|-------------|-------|---------|
 | `[B,H,W,C]` | Input dimensions | — | `[1,48,0,1]` |
-| `C[t\|s\|r]Y,X,F` | Conv2d + activation (t=tanh, s=sigmoid, r/default=relu) | CNN | `Ct3,3,16` |
+| `C[t]Y,X,F` | Conv2d, "same" padding (`t` = tanh, otherwise ReLU) | CNN | `Ct3,3,16` |
+| `Cp[t]Y,X,F,PY,PX` | Conv2d with explicit padding | CNN | `Cpt3,3,32,1,1` |
 | `MpY,X` | MaxPool2d with stride = kernel | CNN | `Mp3,3` |
-| `L[f\|r\|b\|m][x\|y][s]N` | LSTM (f=fwd, r=rev, b=bidi, m=multi) | Seq | `Lfx96`, `Lfys64` |
+| `MpaKY,KX,SY,SX,PY,PX` | MaxPool2d with separate kernel / stride / padding | CNN | `Mpa2,2,2,1,0,1` |
+| `L[f\|r\|b]xN` | LSTM over width (f = forward, r = reverse, b = bidirectional) | Seq | `Lfx96`, `Lbx128` |
+| `LfysN` | Height collapse: LSTM down each column, last state kept | CNN → Seq | `Lfys64` |
+| `AtysD` / `MatysD` / `HybysD` | Height collapse with additive attention / 4-head attention / BiLSTM + attention | CNN → Seq | `Matys128` |
+| `LbpxH,O` | BiLSTM followed by a linear projection to O | Seq | `Lbpx256,256` |
+| `SelfAttnX<heads>` | Multi-head self-attention over width + residual LayerNorm | Seq | `SelfAttnX4` |
+| `ConfX<heads>` | Conformer block (depthwise conv + self-attention + FFN) | Seq | `ConfX4` |
 | `Bn` | Batch Normalization (BatchNorm2d in CNN, BatchNorm1d in seq) | Any | `Bn` |
 | `D<rate>` | Dropout (rate is integer 0–99, only active during training) | Any | `D20` (= 20%) |
 | `Fc<N>` | Dense / fully-connected: Linear(N) + ReLU | Seq | `Fc256` |
 | `O<d>c<N>` | Output: Linear layer, N = class count (`###` = auto) | Seq | `O1c###` |
 
+> **Note:** If a sequence layer follows a 2-D CNN layer without a height-collapse token, the
+> feature map is flattened (channels × height) per column automatically.
+>
 > **Note:** `Bn`, `D`, and `Fc` auto-detect whether the network is still in the 2-D CNN
 > stage or has collapsed to 1-D sequences, and use the appropriate PyTorch module
 > (`BatchNorm2d` vs `BatchNorm1d`, `Dropout2d` vs `Dropout`, etc.).
@@ -794,7 +826,7 @@ Layer breakdown:
 
 ```bash
 # Default (Tesseract-compatible)
---net_spec "[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx512 O1c###]"
+--net_spec "[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]"
 
 # With BN + Dropout (regularized)
 --net_spec "[1,48,0,1 Ct3,3,16 Bn D20 Mp3,3 Lfys64 Lfx96 D30 Lrx96 Lfx512 O1c###]"
@@ -803,9 +835,10 @@ Layer breakdown:
 --net_spec "[1,48,0,1 Ct3,3,16 Bn Mp3,3 Lfys64 Lfx96 Fc256 D40 Lrx96 Lfx512 O1c###]"
 ```
 
-> **⚠️ Tesseract compatibility:** The `Bn`, `D`, and `Fc` tokens are PyTorch-only
-> extensions. Models using them can be trained and exported to ONNX, but **cannot** be
-> converted back to a native Tesseract `.traineddata` file.
+> **⚠️ Tesseract compatibility:** Only the standard Tesseract tokens (`C`, `Mp`, `L…`, `O`) can
+> receive weights via `--start_tess_model`. Everything else (`Bn`, `D`, `Fc`, `Cp`, `Mpa`, attention and
+> Conformer layers, `Lbpx`) is a PyTorch-only extension. Models are exported to ONNX only; there is no
+> export back to a Tesseract `.traineddata` file.
 
 ---
 
@@ -817,6 +850,8 @@ Layer breakdown:
 | **10K iterations** | ~2 hours | ~5 minutes |
 | **Memory** | 2–4 GB RAM | 2–6 GB VRAM |
 | **Speedup** | 1× | **10–50×** |
+
+> Indicative figures; actual throughput depends on the GPU, batch size, line width and architecture.
 
 ### GPU Memory Estimates (Tesla T4, 15GB)
 
@@ -835,11 +870,10 @@ Layer breakdown:
 |---------|-----------|---------------|
 | Training backend | C++ CPU | **PyTorch GPU** |
 | Optimizer | SGD + momentum | **Adam** / **SGD** |
-| Model export | `.traineddata` | `.onnx` |
+| Model export | `.traineddata` | `.onnx` (no `.traineddata` export) |
 | Beam search | ✅ | ✅ + DAWG + LM |
 | Page segmentation | 14 modes | 4 modes (3, 6, 7, 13) |
 | Language model | Word n-gram | **Char + word n-gram** |
-| Unicode recoder | ✅ | ✅ NFC/NFD + ligatures |
 | Synthetic data | `text2image` (C++) | `gen_data_from_text.py` |
 
 ---
@@ -859,19 +893,8 @@ print(torch.cuda.is_available())  # Should be True
 print(torch.cuda.get_device_name(0))  # Should show GPU name
 ```
 
-### PyICU install fails
-```bash
-# Ubuntu/Debian
-sudo apt install libicu-dev pkg-config
-pip install PyICU
-
-# macOS
-brew install icu4c
-export ICU_VERSION=$(brew list --versions icu4c | head -1 | awk '{print $2}')
-export PATH="/usr/local/opt/icu4c/bin:$PATH"
-export PKG_CONFIG_PATH="/usr/local/opt/icu4c/lib/pkgconfig"
-pip install PyICU
-```
+### Apple Silicon (M1/M2/M3)
+Training uses CUDA when available and otherwise falls back to the CPU; the MPS backend is not used.
 
 ### ONNX export fails
 ```bash
@@ -894,7 +917,11 @@ pip install onnx>=1.14.0 onnxruntime>=1.15.0
 | `recognize` | Run OCR inference | `--image`, `--psm`, `--beam_width`, `--wordlist` |
 | `plot` | Training dashboard (7 plots) | `--model_name` |
 | `inspection` | Export feature map images | `--model_name`, `--num_samples` |
-| `compare` | Compare logs and evaluate on custom set | `--models`, `--custom_img_dir` |
+| `compare-inspection` | Side-by-side activation maps and predictions across models | `--model_name`, `--num_samples` |
+| `compare` | Compare logs and evaluate on custom set | `--models`, `--custom_img_dir`, `--custom_realworld_img_dir` |
+| `projection` | Vertical projection-profile alignment grids | `--models`, `--custom_img_dir` |
+| `wer-distribution` | WER grouped by ground-truth word count | `--model_name`, `--custom_dir` |
+| `confusion-matrix` | Per-character errors grouped by Lao component | `--model_name`, `--custom_dir` |
 | `charset-stats` | Analyze character frequencies | `--model_name` |
 | `clean` | Remove generated files | `--model_name` |
 
@@ -924,6 +951,9 @@ python tesseract_tools.py timereport
 
 # Training-time report for one specific model
 python tesseract_tools.py timereport --model_name lao48cnn32
+
+# CoER + CER/WER alignment diagrams
+python tesseract_tools.py metric_explanation
 
 # Run everything
 python tesseract_tools.py all
@@ -976,7 +1006,7 @@ script and produces:
 
 ```python
 IMAGE_FOLDER        = "data/lao-ground-truth-test"
-CUSTOM_TESSDATA_DIR = "data"          # where *_final.traineddata files live
+CUSTOM_TESSDATA_DIR = "tesseract_data"   # where *.traineddata files live
 CUSTOM_MODEL_NAMES  = ["lao48cnn16_final", "lao48cnn32_final", ...]
 TESS_CONFIG         = "--psm 7 --oem 1"
 ```
@@ -994,7 +1024,7 @@ python torch_train.py compare \
     --custom_img_dir data/lao-ground-truth-test
 ```
 
-Outputs to `data/comparison/` (or `--out_dir`):
+Outputs to `data/comparison/` (or `--output_dir`):
 
 | Output file | Contents |
 |-------------|----------|
@@ -1072,6 +1102,24 @@ pip install pytesseract pillow matplotlib numpy
 
 ---
 
+## ⚠️ Known Limitations
+
+These are known issues in the current code. Keep them in mind when you read or report results.
+
+1. **Batch padding is black.** Images are scaled so white paper = +1 and black ink = −1, and `collate_fn` pads narrower lines with −1 (black). The CTC input length also covers the padding. Models with right-to-left (`Lrx`, `Lbx`) or attention layers therefore see the padding before the text, so a line's prediction can change with the other lines in its batch. In a test with an under-trained model, 296 of 400 predictions changed between batch size 1 and 64 with black padding, versus 2 of 400 with white padding. Use `--batch_size 1` for batch-independent evaluation. The planned fix is to pad with white (+1) and pass each line's real length to CTC.
+2. **CER/WER are lenient by default.** `tesstrain_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
+3. **Beam search merges double letters.** The beam decoder (`recognize --beam_width > 1`) doesn't track whether a blank separated two identical characters, so `100` can come out as `10`. Greedy decoding is not affected; `evaluation` and `compare` always decode greedily.
+4. **No learning-rate schedule.** The learning rate stays constant for the whole run.
+5. **Early stopping can use training CER.** On logging steps where validation doesn't run, `--target_error_rate` is checked against the current training batch's CER.
+
+---
+
+## 🔤 Fonts
+
+`fonts/` contains Lao fonts (Phetsarath, Saysettha OT) and Times Newer Roman for synthetic data generation; each font keeps its own license. Microsoft Times New Roman is **not** included. If you want it as the secondary font for digits and Latin text, pass your own copy with `--sec_font`; otherwise the primary font is used.
+
+---
+
 ## 📜 License
 
-Apache 2.0 — Same as [Tesseract](https://github.com/tesseract-ocr/tesseract) and [tesstrain](https://github.com/tesseract-ocr/tesstrain).
+Code: Apache 2.0 — Same as [Tesseract](https://github.com/tesseract-ocr/tesseract) and [tesstrain](https://github.com/tesseract-ocr/tesstrain).

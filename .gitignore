@@ -34,3 +34,25 @@ Thumbs.db
 # Non-code / academic writing
 paper/
 paper_revision/
+
+# Local environment & secrets
+.venv/
+venv/
+.env
+.env.*
+*.pem
+*.key
+
+# Generated outputs
+runs/
+plots/
+benchmark_output/
+tesseract_data/
+.ipynb_checkpoints/
+
+# Personal / scratch files (not part of the toolkit)
+.agents/
+scratch_*.py
+
+# Proprietary fonts (not redistributable) — supply your own via --sec_font
+tesstrain_core/font/TimesNewRoman*.ttf
