@@ -1,8 +1,15 @@
-# 🚀 Tesstrain-GPU
+# Lao OCR Toolkit
 
-**Tesseract OCR Training Pipeline — GPU-Accelerated with PyTorch**
+**Build training data, train and evaluate OCR models for Lao — on GPU with PyTorch**
 
-Train custom Tesseract OCR models 10–50× faster using GPU acceleration. Drop-in replacement for the original [tesstrain](https://github.com/tesseract-ocr/tesstrain) Makefile workflow.
+This toolkit covers the whole path to a Lao text-line recognizer:
+
+- **Data**: turn real scanned documents into line images, and generate synthetic Lao lines and whole synthetic documents that look like real scans.
+- **Training**: train Tesseract-style LSTM models (described by a VGSL string) on GPU with PyTorch and CTC loss, instead of Tesseract's CPU-only `lstmtraining`.
+- **Evaluation**: CER, WER and Lao-specific error analysis (tone marks, vowels, consonants), plus comparisons against Tesseract models.
+- **Deployment**: export to ONNX.
+
+It reads the same ground-truth format as [tesstrain](https://github.com/tesseract-ocr/tesstrain) (`.gt.txt`, `.lstmf`, `unicharset`), so existing Tesseract training data works unchanged. Trained models are exported to ONNX, not to Tesseract `.traineddata`.
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
@@ -792,28 +799,87 @@ plots/                              # tesseract_tools.py training plots
 
 ## 🏗️ Pipeline Architecture
 
+The work happens in four stages. Every source of training data ends up in the same format, one line image + one `.gt.txt` label (+ `.lstmf`), so the sources can be mixed freely.
+
+```mermaid
+flowchart LR
+    subgraph S1["① Training data"]
+        direction TB
+        R["Real scans<br/>PDF / JPG / PNG"] --> SEG["segment_document.py<br/>deskew → layout analysis → line crops"]
+        SEG --> FIX["Correct the draft text<br/>.ocr.txt → .gt.txt"]
+        C["Lao text corpus"] --> GL["gen_data_from_text.py<br/>single rendered lines"]
+        C --> GD["gen_documents.py<br/>synthetic letter pages + scan simulation"]
+        GD --> SEG2["same segmentation as real scans<br/>(tesstrain_core/doc_layout.py)"]
+        FIX --> GT[("line images<br/>+ .gt.txt + .lstmf")]
+        GL --> GT
+        SEG2 --> GT
+        GT -.-> CMP["compare_line_stats.py<br/>synthetic vs real check"]
+    end
+
+    subgraph S2["② Training"]
+        direction TB
+        U["unicharset<br/>character set"] --> L["lists<br/>train / val / test split"]
+        L --> TR["training<br/>VGSL model · CTC loss · GPU"]
+        TR --> CK[("checkpoints<br/>_best.pt / _final.pt")]
+    end
+
+    subgraph S3["③ Evaluation"]
+        direction TB
+        EV["evaluation<br/>CER · WER · CoER"]
+        CO["compare / inspection<br/>models side by side"]
+    end
+
+    subgraph S4["④ Deployment & inference"]
+        direction TB
+        EX["export<br/>ONNX model + charset"]
+        RE["recognize<br/>page → lines → model → decoder → text"]
+    end
+
+    GT --> U
+    CK --> EV
+    CK --> CO
+    CK --> EX
+    CK --> RE
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Training Pipeline                                                  │
-│                                                                     │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────┐  │
-│  │  .gt.txt  │    │  .lstmf  │    │ PyTorch  │    │   Export     │  │
-│  │  .tif     │──▸ │  lists   │──▸ │ Training │──▸ │   .onnx      │  │
-│  │  images   │    │          │    │  (GPU)   │    │              │  │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────────┘  │
-│   unicharset       lists          training        export           │
-│                                                                     │
-├─────────────────────────────────────────────────────────────────────┤
-│  Inference Pipeline                                                 │
-│                                                                     │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────┐  │
-│  │  Input   │    │   Page   │    │  LSTM    │    │  Beam Search │  │
-│  │  Image   │──▸ │  Segment │──▸ │ Forward  │──▸ │  + DAWG + LM │  │
-│  │          │    │  (PSM)   │    │  Pass    │    │  → Text      │  │
-│  └──────────┘    └──────────┘    └──────────┘    └──────────────┘  │
-│                    recognize                                        │
-└─────────────────────────────────────────────────────────────────────┘
-```
+
+### ① Training data
+
+| Source | Command | What you get |
+|---|---|---|
+| Real scanned documents | `segment_document.py` | One image per text line + Tesseract draft text (`.ocr.txt`). Correct the draft and save it as `.gt.txt`. |
+| Synthetic lines | `gen_data_from_text.py` | Single rendered Lao lines with exact labels; quick to make in large numbers. |
+| Synthetic documents | `gen_documents.py` | Whole letter-style pages, "scanned", then cut into lines by the **same code as real scans**, so the crops look like real ones. Exact labels. |
+| Quality check | `compare_line_stats.py` | Text size, line length, ink and paper statistics of synthetic vs real lines. |
+
+Real line images are converted to `.lstmf` with `gen_data_from_text.py --convert_only --ext png --output_dir <folder>`; the generators write `.lstmf` directly with `--to_lstmf`.
+
+### ② Training — `torch_train.py`
+
+| Step | Command | Input → output |
+|---|---|---|
+| Character set | `unicharset` | `.gt.txt` files → `unicharset`, `charset.json` |
+| Split | `lists` | `.lstmf` files → `list.train`, `list.val`, `list.test` |
+| Train | `training` | lists + VGSL `--net_spec` → `<model>_best.pt`, `<model>_final.pt`, `training.log`, TensorBoard logs |
+
+The model is built from the VGSL string (CNN layers → height collapse → LSTM layers → output layer) and trained with CTC loss; `--start_model` / `--start_tess_model` continue from a checkpoint or a Tesseract model.
+
+### ③ Evaluation
+
+| Command | What it measures |
+|---|---|
+| `torch_train.py evaluation` | CER, WER, line accuracy and per-component Lao errors (CoER) on the validation list |
+| `torch_train.py compare` | Several models on the same image folders (synthetic and real), with plots and CSV reports |
+| `torch_train.py inspection`, `confusion-matrix`, `wer-distribution` | What the network sees, which characters it confuses, where errors cluster |
+| `tesseract_tools.py`, `compare_cross.py`, `benchmark.py` | Tesseract models and Tesseract vs PyTorch comparisons |
+
+### ④ Deployment and inference
+
+| Command | What it does |
+|---|---|
+| `torch_train.py export` | Writes `<model>.onnx` + `<model>_model_info.json` (charset, input height) for ONNX Runtime |
+| `torch_train.py recognize` | Reads one image: splits a page into lines (`--psm 3` columns + lines, `--psm 6` lines, `--psm 7` single line), runs the model, decodes with greedy CTC or beam search (+ word list DAWG, + n-gram language model) |
+
+> `recognize` still splits pages with a simple projection-profile method. The Lao-aware segmenter in `tesstrain_core/doc_layout.py` (marks kept whole, stamps and signatures excluded) is currently used for preparing training data only.
 
 ---
 
@@ -934,7 +1000,7 @@ Layer breakdown:
 
 ## ⚡ Performance
 
-| Metric | Tesseract `lstmtraining` | tesstrain-gpu |
+| Metric | Tesseract `lstmtraining` | This toolkit |
 |--------|--------------------------|---------------|
 | **Training speed** | ~20 samples/sec (CPU) | ~500 samples/sec (GPU) |
 | **10K iterations** | ~2 hours | ~5 minutes |
@@ -956,7 +1022,7 @@ Layer breakdown:
 
 ## 🆚 Comparison with Tesseract
 
-| Feature | Tesseract | tesstrain-gpu |
+| Feature | Tesseract | This toolkit |
 |---------|-----------|---------------|
 | Training backend | C++ CPU | **PyTorch GPU** |
 | Optimizer | SGD + momentum | **Adam** / **SGD** |
