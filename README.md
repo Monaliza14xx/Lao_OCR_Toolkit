@@ -40,6 +40,7 @@ It reads the same ground-truth format as [tesstrain](https://github.com/tesserac
 ## 📑 Table of Contents
 - [✨ Features](#-features)
 - [📦 Installation](#-installation)
+  - [Web UI (train on Colab from your browser)](#web-ui-train-on-colab-from-your-browser)
 - [🚀 Quick Start (5 minutes)](#-quick-start-5-minutes)
 - [📝 Synthetic Data Generation](#-synthetic-data-generation)
   - [Augmentation Presets](#augmentation-presets---preset)
@@ -135,6 +136,12 @@ print(f"GPU: {torch.cuda.get_device_name(0)}")  # e.g. Tesla T4
 # Start training (needs .lstmf ground truth in data/lao-ground-truth/, see Quick Start)
 !python3 torch_train.py training --model_name lao --max_iterations 5000
 ```
+
+### Web UI (train on Colab from your browser)
+
+Start, watch and stop training from a browser on your computer while the GPU work runs on Colab,
+with live loss, CER and Lao component-error charts. Run `webapp/colab_server.ipynb` on Colab, then
+`cd webapp/ui && npm install && npm run dev` locally. Full manual: [webapp/README.md](webapp/README.md).
 
 ---
 
