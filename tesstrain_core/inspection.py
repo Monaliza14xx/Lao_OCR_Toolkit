@@ -233,67 +233,33 @@ def cmd_inspection(args: Namespace):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"  Device:       {device}")
     
-    tessdata_dir = getattr(args, 'tessdata_dir', '')
-    
-    if tessdata_dir:
-        tess_path = os.path.join(tessdata_dir, f"{args.model_name}.traineddata")
-        if not os.path.exists(tess_path):
-            print(f"  ERROR: Tesseract model not found: {tess_path}")
-            return
+    # 1. Find checkpoint
+    ckpt_path = getattr(args, 'start_model', None)
+    if not ckpt_path:
+        ckpt_path = os.path.join(p.output_dir, f"{args.model_name}_best.pt")
             
-        print(f"  Loading Tesseract: {tess_path}")
-        from tesstrain_core.tesseract_transfer import load_tesseract_pretrained_state_dict
-        
-        # Infer net_spec from model name if not provided in args
-        if hasattr(args, 'net_spec') and args.net_spec:
-            net_spec = args.net_spec
-            print(f"  Using provided SPEC: {net_spec}")
-        else:
-            mname = args.model_name
-            h = 64 if "I64" in mname else 48
-            if "K5C32" in mname: ct = "Ct5,5,32"
-            elif "K5C16" in mname: ct = "Ct5,5,16"
-            elif "K3C32" in mname: ct = "Ct3,3,32"
-            else: ct = "Ct3,3,16"
+    if not os.path.exists(ckpt_path):
+        print(f"  ERROR: Checkpoint not found at {ckpt_path}")
+        return
             
-            net_spec = f"[1,{h},0,1 {ct} Mp3,3 Lfys{h} Lfx96 Lrx96 Lfx256 O1c###]"
-            print(f"  Inferred SPEC: {net_spec}")
+    print(f"  Loading PyTorch: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
         
-        tess_state, tess_meta = load_tesseract_pretrained_state_dict(tess_path, net_spec)
-        num_classes = list(tess_state.values())[-2].shape[0]
-        model = build_model(net_spec, num_classes).to(device)
-        model.load_state_dict(tess_state)
-        model.eval()
+    net_spec = ckpt.get('net_spec', '[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c###]')
+    print(f"  NET_SPEC:     {net_spec}")
         
-        out_base = os.path.join(p.output_dir, 'inspection_tesseract')
+    # 2. Build model
+    out_weight = ckpt['model_state_dict'].get(f"{len(ckpt['model_state_dict'])//2 - 1}.weight")
+    if out_weight is not None:
+        num_classes = out_weight.shape[0]
     else:
-        # 1. Find checkpoint
-        ckpt_path = getattr(args, 'start_model', None)
-        if not ckpt_path:
-            ckpt_path = os.path.join(p.output_dir, f"{args.model_name}_best.pt")
+        num_classes = list(ckpt['model_state_dict'].values())[-2].shape[0]
             
-        if not os.path.exists(ckpt_path):
-            print(f"  ERROR: Checkpoint not found at {ckpt_path}")
-            return
-            
-        print(f"  Loading PyTorch: {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    model = build_model(net_spec, num_classes).to(device)
+    model.load_state_dict(ckpt['model_state_dict'])
+    model.eval()
         
-        net_spec = ckpt.get('net_spec', '[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c###]')
-        print(f"  NET_SPEC:     {net_spec}")
-        
-        # 2. Build model
-        out_weight = ckpt['model_state_dict'].get(f"{len(ckpt['model_state_dict'])//2 - 1}.weight")
-        if out_weight is not None:
-            num_classes = out_weight.shape[0]
-        else:
-            num_classes = list(ckpt['model_state_dict'].values())[-2].shape[0]
-            
-        model = build_model(net_spec, num_classes).to(device)
-        model.load_state_dict(ckpt['model_state_dict'])
-        model.eval()
-        
-        out_base = os.path.join(p.output_dir, 'inspection')
+    out_base = os.path.join(p.output_dir, 'inspection')
     
     # 3. Find files to inspect
     files = []
@@ -962,47 +928,20 @@ def cmd_wer_distribution(args):
     print(f"  Device: {device}")
 
     # ── Load model ────────────────────────────────────────────────────────────
-    tessdata_dir = getattr(args, 'tessdata_dir', '')
-
-    if tessdata_dir:
-        tess_path = os.path.join(tessdata_dir, f"{args.model_name}.traineddata")
-        if not os.path.exists(tess_path):
-            print(f"  ERROR: Tesseract model not found: {tess_path}")
-            return
-        print(f"  Loading Tesseract: {tess_path}")
-        from tesstrain_core.tesseract_transfer import load_tesseract_pretrained_state_dict
-
-        if hasattr(args, 'net_spec') and args.net_spec:
-            net_spec = args.net_spec
-        else:
-            mname = args.model_name
-            h = 64 if "I64" in mname else 48
-            if "K5C32" in mname: ct = "Ct5,5,32"
-            elif "K5C16" in mname: ct = "Ct5,5,16"
-            elif "K3C32" in mname: ct = "Ct3,3,32"
-            else: ct = "Ct3,3,16"
-            net_spec = f"[1,{h},0,1 {ct} Mp3,3 Lfys{h} Lfx96 Lrx96 Lfx256 O1c###]"
-
-        tess_state, tess_meta = load_tesseract_pretrained_state_dict(tess_path, net_spec)
-        num_classes = list(tess_state.values())[-2].shape[0]
-        model = build_model(net_spec, num_classes).to(device)
-        model.load_state_dict(tess_state)
-        model.eval()
-    else:
-        ckpt_path = getattr(args, 'start_model', None)
-        if not ckpt_path:
-            ckpt_path = os.path.join(p.output_dir, f"{args.model_name}_best.pt")
-        if not os.path.exists(ckpt_path):
-            print(f"  ERROR: Checkpoint not found at {ckpt_path}")
-            return
-        print(f"  Loading PyTorch: {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
-        net_spec = ckpt.get('net_spec', '[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c###]')
-        num_classes = list(ckpt['model_state_dict'].values())[-2].shape[0]
-        model = build_model(net_spec, num_classes).to(device)
-        model.load_state_dict(ckpt['model_state_dict'])
-        model.eval()
-        print(f"  NET_SPEC: {net_spec}")
+    ckpt_path = getattr(args, 'start_model', None)
+    if not ckpt_path:
+        ckpt_path = os.path.join(p.output_dir, f"{args.model_name}_best.pt")
+    if not os.path.exists(ckpt_path):
+        print(f"  ERROR: Checkpoint not found at {ckpt_path}")
+        return
+    print(f"  Loading PyTorch: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    net_spec = ckpt.get('net_spec', '[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c###]')
+    num_classes = list(ckpt['model_state_dict'].values())[-2].shape[0]
+    model = build_model(net_spec, num_classes).to(device)
+    model.load_state_dict(ckpt['model_state_dict'])
+    model.eval()
+    print(f"  NET_SPEC: {net_spec}")
 
     # ── Load eval samples ─────────────────────────────────────────────────────
     custom_dir = getattr(args, 'custom_dir', '')
@@ -1026,15 +965,10 @@ def cmd_wer_distribution(args):
 
         # Need charset + target_h from the loaded model checkpoint
         import re as _re
-        if tessdata_dir:
-            # Tesseract model — charset from tess_meta
-            inv_cs = tess_meta.get('inv_charset', {}) if isinstance(tess_meta, dict) else {}
-            target_h = 64 if "I64" in args.model_name else 48
-        else:
-            inv_cs = {v: k for k, v in ckpt['charset'].items()}
-            target_h = 48
-            m_h = _re.match(r'\[?\d+,(\d+),', ckpt.get('net_spec', ''))
-            if m_h: target_h = int(m_h.group(1))
+        inv_cs = {v: k for k, v in ckpt['charset'].items()}
+        target_h = 48
+        m_h = _re.match(r'\[?\d+,(\d+),', ckpt.get('net_spec', ''))
+        if m_h: target_h = int(m_h.group(1))
 
         from tesstrain_core.recognize import recognize_line
 
@@ -1324,45 +1258,20 @@ def cmd_confusion_matrix(args):
     print(f"  Device: {device}")
 
     # ── Load model (same pattern as wer_distribution) ─────────────────────────
-    tessdata_dir = getattr(args, 'tessdata_dir', '')
-
-    if tessdata_dir:
-        tess_path = os.path.join(tessdata_dir, f"{args.model_name}.traineddata")
-        if not os.path.exists(tess_path):
-            print(f"  ERROR: Tesseract model not found: {tess_path}")
-            return
-        print(f"  Loading Tesseract: {tess_path}")
-        from tesstrain_core.tesseract_transfer import load_tesseract_pretrained_state_dict
-        if hasattr(args, 'net_spec') and args.net_spec:
-            net_spec = args.net_spec
-        else:
-            mname = args.model_name
-            h = 64 if "I64" in mname else 48
-            if "K5C32" in mname: ct = "Ct5,5,32"
-            elif "K5C16" in mname: ct = "Ct5,5,16"
-            elif "K3C32" in mname: ct = "Ct3,3,32"
-            else: ct = "Ct3,3,16"
-            net_spec = f"[1,{h},0,1 {ct} Mp3,3 Lfys{h} Lfx96 Lrx96 Lfx256 O1c###]"
-        tess_state, tess_meta = load_tesseract_pretrained_state_dict(tess_path, net_spec)
-        num_classes = list(tess_state.values())[-2].shape[0]
-        model = build_model(net_spec, num_classes).to(device)
-        model.load_state_dict(tess_state)
-        model.eval()
-    else:
-        ckpt_path = getattr(args, 'start_model', None)
-        if not ckpt_path:
-            ckpt_path = os.path.join(p.output_dir, f"{args.model_name}_best.pt")
-        if not os.path.exists(ckpt_path):
-            print(f"  ERROR: Checkpoint not found at {ckpt_path}")
-            return
-        print(f"  Loading PyTorch: {ckpt_path}")
-        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
-        net_spec = ckpt.get('net_spec', '[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c###]')
-        num_classes = list(ckpt['model_state_dict'].values())[-2].shape[0]
-        model = build_model(net_spec, num_classes).to(device)
-        model.load_state_dict(ckpt['model_state_dict'])
-        model.eval()
-        print(f"  NET_SPEC: {net_spec}")
+    ckpt_path = getattr(args, 'start_model', None)
+    if not ckpt_path:
+        ckpt_path = os.path.join(p.output_dir, f"{args.model_name}_best.pt")
+    if not os.path.exists(ckpt_path):
+        print(f"  ERROR: Checkpoint not found at {ckpt_path}")
+        return
+    print(f"  Loading PyTorch: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    net_spec = ckpt.get('net_spec', '[1,36,0,1 Ct3,3,16 Mp3,3 Lfys48 Lfx96 Lrx96 Lfx256 O1c###]')
+    num_classes = list(ckpt['model_state_dict'].values())[-2].shape[0]
+    model = build_model(net_spec, num_classes).to(device)
+    model.load_state_dict(ckpt['model_state_dict'])
+    model.eval()
+    print(f"  NET_SPEC: {net_spec}")
 
     # ── Collect all (gt, pred) pairs ──────────────────────────────────────────
     custom_dir = getattr(args, 'custom_dir', '')
@@ -1383,14 +1292,10 @@ def cmd_confusion_matrix(args):
         print(f"  Eval samples: {len(test_pairs)} (custom)")
 
         import re as _re
-        if tessdata_dir:
-            inv_cs = tess_meta.get('inv_charset', {}) if isinstance(tess_meta, dict) else {}
-            target_h = 64 if "I64" in args.model_name else 48
-        else:
-            inv_cs = {v: k for k, v in ckpt['charset'].items()}
-            target_h = 48
-            m_h = _re.match(r'\[?\d+,(\d+),', ckpt.get('net_spec', ''))
-            if m_h: target_h = int(m_h.group(1))
+        inv_cs = {v: k for k, v in ckpt['charset'].items()}
+        target_h = 48
+        m_h = _re.match(r'\[?\d+,(\d+),', ckpt.get('net_spec', ''))
+        if m_h: target_h = int(m_h.group(1))
 
         from tesstrain_core.recognize import recognize_line
         model.eval()

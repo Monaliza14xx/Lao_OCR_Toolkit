@@ -125,30 +125,15 @@ Get help for a subcommand:
       --epochs 50 \\
       --learning_rate 0.0005
 
---------------------------------------------------------
- Quick start: Transfer from Tesseract CPU model
---------------------------------------------------------
-  python torch_train.py training \\
-      --model_name lao \\
-      --start_tess_model /path/to/lao.traineddata \\
-      --net_spec "[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]" \\
-      --batch_size 32 \\
-      --epochs 50 \\
-      --learning_rate 0.0005
-
   Tips:
     - Use a lower --learning_rate when fine-tuning (e.g. 0.0005)
     - --start_model accepts a .pt checkpoint saved during a previous run
-    - --start_tess_model accepts a Tesseract .traineddata or .lstm file
-    - For --start_tess_model, make sure --net_spec matches the source model
     - Best checkpoint is saved as data/MODEL_NAME/MODEL_NAME_best.pt
 """)
     add_common_args(p)
     g = p.add_argument_group('model')
     g.add_argument('--start_model', default='', metavar='PATH',
                    help='Checkpoint (.pt) to fine-tune from        (default: train from scratch)')
-    g.add_argument('--start_tess_model', default='', metavar='PATH',
-                   help='Tesseract model (.traineddata/.lstm) for transfer learning warm-start')
     g.add_argument('--net_spec',
                    default='[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]',
                    metavar='SPEC',
@@ -242,7 +227,6 @@ Get help for a subcommand:
     p.add_argument('--num-samples', '--num_samples', dest='num_samples', type=int, default=10, help='Number of images to inspect (default: 10)')
     p.add_argument('--min_length', '--min-length', dest='min_length', type=int, default=3, help='Minimum length of GT text to be selected (default: 3)')
     p.add_argument('--seed', type=int, default=42, help='RNG seed for sample selection — same seed = same samples across all models (default: 42)')
-    p.add_argument('--tessdata_dir', default='', help='Directory with .traineddata models (if inspecting a Tesseract model)')
 
     # compare
     p = sub.add_parser('compare', help='Compare training logs and optionally evaluate models on a custom image set')
@@ -277,14 +261,12 @@ Get help for a subcommand:
     # wer-distribution
     p = sub.add_parser('wer-distribution', help='Analyse WER distribution grouped by GT word count')
     add_common_args(p)
-    p.add_argument('--tessdata_dir', default='', help='Directory with .traineddata models (if analysing a Tesseract model)')
     p.add_argument('--custom_dir', default='', metavar='DIR',
                    help='Custom dataset directory with images + .gt.txt files (overrides default eval split)')
 
     # confusion-matrix
     p = sub.add_parser('confusion-matrix', help='Per-character error analysis grouped by Lao component category')
     add_common_args(p)
-    p.add_argument('--tessdata_dir', default='', help='Directory with .traineddata models (if analysing a Tesseract model)')
     p.add_argument('--custom_dir', default='', metavar='DIR',
                    help='Custom dataset directory with images + .gt.txt files (overrides default eval split)')
 

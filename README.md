@@ -9,7 +9,7 @@ This toolkit covers the whole path to a Lao text-line recognizer:
 - **Evaluation**: CER, WER and Lao-specific error analysis (tone marks, vowels, consonants), plus comparisons against Tesseract models.
 - **Deployment**: export to ONNX.
 
-It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract-ocr/tesstrain), so existing tesstrain `.lstmf` data can be used as is (image + `.gt.txt` pairs are converted first). The character set is built from the training data (`charset.json`), not read from a `unicharset`. Trained models are exported to ONNX, not to Tesseract `.traineddata`, and Tesseract model weights cannot be loaded (see [Known Limitations](#️-known-limitations)).
+It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract-ocr/tesstrain), so existing tesstrain `.lstmf` data can be used as is (image + `.gt.txt` pairs are converted first). The character set is built from the training data (`charset.json`), not read from a `unicharset`. Trained models are exported to ONNX, not to Tesseract `.traineddata`, and importing Tesseract model weights is not supported.
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
@@ -795,7 +795,6 @@ Lao_OCR_Toolkit/
 │   ├── doc_layout.py           # Deskew, layout analysis, Lao-aware line segmentation
 │   ├── doc_synth.py            # Synthetic letter layout + scan simulation
 │   ├── dawg.py                 # Word/number/punctuation DAWGs + n-gram LM
-│   ├── tesseract_transfer.py   # Tesseract .lstm weight parser (broken on real models, see Known Limitations)
 │   ├── compare.py, inspection.py, projection.py, plotting.py   # Analysis & figures
 │   └── command_utils.py, utils.py
 ├── experiments/                # Research scripts: benchmarks, cross-comparisons, corpus
@@ -1346,7 +1345,7 @@ These are known issues in the current code. Keep them in mind when you read or r
 2. **CER/WER are lenient by default.** Strict CER and CluER are now reported next to it (see [Evaluation](#evaluation)). `tesstrain_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
 3. **Beam search merges double letters.** The beam decoder (`recognize --beam_width > 1`) doesn't track whether a blank separated two identical characters, so `100` can come out as `10`. Greedy decoding is not affected; `evaluation` and `compare` always decode greedily.
 4. **No learning-rate schedule by default.** The learning rate stays constant unless you pass `--lr_scheduler plateau`.
-5. **Tesseract weights can't be loaded.** `--start_tess_model` and `tesstrain_core/tesseract_transfer.py` exist, but the parser expects a different layer layout from the one Tesseract 4 writes (it doesn't read the `Series` that wraps each convolution), so it fails at the first layer of real models such as the stock `lao.traineddata`, and training exits with "Failed to parse Tesseract model". The `--tessdata_dir` option of `inspection`, `wer-distribution` and `confusion-matrix` uses the same parser. There are no tests for it. Start from scratch or from a PyTorch checkpoint (`--start_model`).
+5. **Importing Tesseract weights is not supported.** There is no option to start from a Tesseract `.traineddata` / `.lstm` model; train from scratch or continue from a PyTorch checkpoint (`--start_model`). Tesseract models are only used for comparison (`tesseract_tools.py compare`, `experiments/compare_cross.py`, which run the `tesseract` binary).
 6. **Early stopping can use training CER.** On logging steps where validation doesn't run, `--target_error_rate` is checked against the current training batch's CER.
 
 ---

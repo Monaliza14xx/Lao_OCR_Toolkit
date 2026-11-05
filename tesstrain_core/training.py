@@ -16,10 +16,27 @@ from .model import build_model, output_lengths
 from .metrics import compute_metrics, compute_mean_rms, TrainingLogger
 from .report import render_progress, COER_KEYS
 from .command_utils import cmd_plot
-from .tesseract_transfer import (
-    load_tesseract_pretrained_state_dict,
-    apply_compatible_pretrained_weights,
-)
+
+
+def apply_compatible_pretrained_weights(model, pretrained_state):
+    """Copy every tensor whose name and shape match into model; return (loaded, skipped).
+
+    Used when a --start_model checkpoint doesn't load strictly (e.g. a different charset size,
+    so the output layer differs): the rest of the network is still reused.
+    """
+    model_state = model.state_dict()
+    loaded, skipped = [], []
+    for key, value in pretrained_state.items():
+        if key not in model_state:
+            skipped.append((key, 'missing'))
+            continue
+        if model_state[key].shape != value.shape:
+            skipped.append((key, f"shape {tuple(value.shape)} != {tuple(model_state[key].shape)}"))
+            continue
+        model_state[key] = value.to(dtype=model_state[key].dtype)
+        loaded.append(key)
+    model.load_state_dict(model_state, strict=False)
+    return loaded, skipped
 
 def _save(model, optimizer, it, ds, args, path, scheduler=None):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
@@ -120,12 +137,6 @@ def cmd_training(args):
     spec = args.net_spec
     start_iter = 0
     ckpt = None
-    tess_state = None
-    tess_meta = {}
-
-    if getattr(args, 'start_model', '') and getattr(args, 'start_tess_model', ''):
-        print("  Warning: both --start_model and --start_tess_model were provided.")
-        print("           Using --start_model and ignoring --start_tess_model.")
 
     if getattr(args, 'start_model', '') and os.path.exists(args.start_model):
         print(f"  Loading checkpoint: {args.start_model}")
@@ -136,22 +147,6 @@ def cmd_training(args):
                 args.net_spec = spec      # keep args in sync so _save() persists the right spec
                 print(f"  Using net_spec from checkpoint: {spec}")
             start_iter = ckpt.get('iteration', 0)
-    elif getattr(args, 'start_tess_model', ''):
-        if not os.path.exists(args.start_tess_model):
-            print(f"Error: Tesseract model not found: {args.start_tess_model}")
-            sys.exit(1)
-        print(f"  Loading Tesseract model: {args.start_tess_model}")
-        try:
-            tess_state, tess_meta = load_tesseract_pretrained_state_dict(args.start_tess_model, spec)
-        except Exception as e:
-            print(f"Error: Failed to parse Tesseract model: {e}")
-            print("  Tip: ensure --net_spec matches the source Tesseract network architecture.")
-            sys.exit(1)
-
-        if tess_meta.get('exported_net_spec'):
-            print(f"  Source net_spec metadata: {tess_meta['exported_net_spec']}")
-        if tess_meta.get('iteration') is not None:
-            print(f"  Source iteration: {tess_meta.get('iteration')}")
 
     spec = spec.replace('###', str(train_ds.num_classes))
     print(f"\n  Model: {spec}")
@@ -170,20 +165,6 @@ def cmd_training(args):
             loaded, skipped = apply_compatible_pretrained_weights(model, state)
             start_iter = 0
             print(f"  Loaded {len(loaded)} tensors, skipped {len(skipped)}")
-
-    if tess_state is not None:
-        loaded, skipped = apply_compatible_pretrained_weights(model, tess_state)
-        print(f"  Tesseract transfer loaded {len(loaded)} tensors, skipped {len(skipped)}")
-        if skipped:
-            # Show only a small sample to keep logs readable.
-            preview = ', '.join(k for k, _ in skipped[:5])
-            if len(skipped) > 5:
-                preview += ', ...'
-            print(f"  Skipped keys: {preview}")
-        if not loaded:
-            print("Error: No compatible tensors were loaded from the Tesseract model.")
-            print("  Verify that --net_spec matches the source model architecture.")
-            sys.exit(1)
 
 
     if getattr(args, 'optimizer', 'Adam') == 'SGD':

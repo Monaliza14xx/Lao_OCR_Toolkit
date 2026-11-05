@@ -385,7 +385,8 @@ def cmd_clean(args):
 
     print(f"  Cleaning: {p.output_dir}")
     exts = ['*.pt', '*.log', '*.json', '*.onnx',
-            'unicharset', 'charset.json', 'list.train', 'list.eval',
+            'unicharset', 'charset.json', 'list.train', 'list.val', 'list.test',
+            'list.eval',   # name used by older versions
             'config.json', 'training_plot.png', 'plot_*.png',
             'charset_stats.csv']
 

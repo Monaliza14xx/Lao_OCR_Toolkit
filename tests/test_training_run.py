@@ -100,3 +100,16 @@ def test_default_run_keeps_a_constant_lr(gt_dir, tmp_path):
         lrs = {float(r['learning_rate']) for r in csv.DictReader(f)}
     assert lrs == {0.002}
     assert 'scheduler_state_dict' not in torch.load(tmp_path / 'tiny_final.pt', weights_only=False)
+
+
+def test_compatible_weights_skip_a_resized_output_layer():
+    """--start_model fallback: a checkpoint with another charset size still gives its other layers."""
+    from tesstrain_core.model import build_model
+    from tesstrain_core.training import apply_compatible_pretrained_weights
+    torch.manual_seed(0)
+    src = build_model(SPEC.replace('###', '10'), 10)
+    dst = build_model(SPEC.replace('###', '12'), 12)
+    loaded, skipped = apply_compatible_pretrained_weights(dst, src.state_dict())
+    out = str(len(dst) - 1)                                   # index of the output Linear
+    assert {k for k, _ in skipped} == {f'{out}.weight', f'{out}.bias'}
+    assert torch.equal(dst.state_dict()['0.weight'], src.state_dict()['0.weight']) and loaded
