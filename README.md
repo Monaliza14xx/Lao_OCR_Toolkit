@@ -11,7 +11,7 @@ This toolkit covers the whole path to a Lao text-line recognizer:
 
 It reads the same ground-truth format as [tesstrain](https://github.com/tesseract-ocr/tesstrain) (`.gt.txt`, `.lstmf`, `unicharset`), so existing Tesseract training data works unchanged. Trained models are exported to ONNX, not to Tesseract `.traineddata`.
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 
@@ -97,23 +97,22 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 ### 3. Optional dependencies
 
+`requirements.txt` already installs matplotlib (training charts), fonttools (glyph-coverage checks
+in the synthetic data generator), scipy + pypdfium2 (document workflow) and pytesseract. These are
+not in it:
+
 ```bash
 # ONNX export & inference
 pip install onnx onnxruntime       # CPU
 pip install onnx onnxruntime-gpu   # GPU
 
-# Training charts and live metrics
-pip install matplotlib tensorboard
-
-# Glyph-coverage checks in the synthetic data generator (recommended)
-pip install fonttools
-
-# Document workflow: line segmentation (scipy) and reading PDFs (pypdfium2)
-pip install scipy pypdfium2
-
-# Comparing against real Tesseract models (also needs the tesseract binary in PATH)
-pip install pytesseract
+# Live TensorBoard metrics during training
+pip install tensorboard
 ```
+
+Comparing against real Tesseract models and `segment_document.py`'s draft text need the `tesseract`
+binary in `PATH`; `proto-model` needs Tesseract's training tools (`combine_lang_model`). `unicharset`
+uses `unicharset_extractor` when it is installed and a Python fallback otherwise.
 
 ### 4. Verify installation
 
@@ -124,15 +123,16 @@ python3 -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda
 ### Google Colab (zero-install)
 
 ```python
-# Everything is pre-installed on Colab!
+# PyTorch, NumPy, Pillow, matplotlib and SciPy are pre-installed on Colab
 !git clone https://github.com/Monaliza14xx/Lao_OCR_Toolkit.git
 %cd Lao_OCR_Toolkit
+!pip install -q pytesseract fonttools pypdfium2 tensorboard
 
 # Verify GPU
 import torch
-print(f"GPU: {torch.cuda.get_device_name(0)}")  # Tesla T4
+print(f"GPU: {torch.cuda.get_device_name(0)}")  # e.g. Tesla T4
 
-# Start training
+# Start training (needs .lstmf ground truth in data/lao-ground-truth/, see Quick Start)
 !python3 torch_train.py training --model_name lao --max_iterations 5000
 ```
 
@@ -152,6 +152,10 @@ data/lao-ground-truth/
   ├── line_001.tif       # Grayscale line image
   ├── line_001.gt.txt    # Text file containing exactly: "ສະບາຍດີ"
 ```
+Training reads `.lstmf` files, so convert the pairs once (use `--ext png` / `jpg` for those images):
+```bash
+python3 gen_data_from_text.py --convert_only --ext tif --output_dir data/lao-ground-truth
+```
 
 #### Way 2: Synthetic generation from your own text (Fastest)
 Render images directly from a plain text corpus using the included script. This is the fastest way to bootstrap a new language or fine-tune an existing model on your specific domain's vocabulary.
@@ -167,7 +171,7 @@ python3 gen_data_from_text.py \
 *(See the [Synthetic Data Generation](#-synthetic-data-generation) section for advanced options like multi-font, noise, and blur.)*
 
 #### Way 3: Migrate from original Tesseract training
-If you already have a `data/<model_name>-ground-truth/` folder containing `.tif` and `.gt.txt` pairs from using the original `tesstrain` Makefile, you can reuse it entirely without any changes!
+If you already have a `data/<model_name>-ground-truth/` folder from the original `tesstrain` Makefile, you can reuse it. If it already holds the `.lstmf` files, nothing needs to change; if it only has `.tif` + `.gt.txt` pairs, convert them as in Way 1.
 
 ### Step 2: Run the full pipeline
 
@@ -260,8 +264,9 @@ python3 gen_data_from_text.py --convert_only --ext png \
 | **Per-sample random seed** (`--seed` + sample index). | Runs are reproducible and parallel workers don't repeat each other's choices. |
 
 #### Output Example:
-- `line_0001.png`: A 48px high image containing the text.
-- `line_0001.gt.txt`: A text file containing exactly what is in the image.
+- `synth_0000001.tif`: the rendered line (name from `--prefix`, default `synth`; format from `--ext`, default `tif`). Its height follows the font size; the trainer rescales every line to the `net_spec` height.
+- `synth_0000001.gt.txt`: A text file containing exactly what is in the image.
+- `synth_0000001.lstmf`: with `--to_lstmf`.
 
 ---
 
@@ -293,13 +298,13 @@ Each preset controls the same set of parameters. Below is the full breakdown sho
 | Parameter | `clean` | `scan-mild` | `scan-heavy` | `real-match` | What it controls |
 |-----------|---------|-------------|--------------|--------------|------------------|
 | `noise_prob` | 0.0 | 0.50 | 0.85 | **0.70** | Probability a sample receives noise |
-| `noise_intensity` | 0.0 | 0.025 | 0.070 | **0.046** | Noise σ as fraction of 255 (σ = value × 255) |
+| `noise_intensity` | 0.0 | 0.025 | 0.070 | **0.0461** | Noise σ as fraction of 255 (σ = value × 255) |
 | `blur_prob` | 0.0 | 0.20 | 0.60 | **0.20** | Probability a sample gets blurred |
 | `blur_radius` | 0.0 | 0.50 | 1.50 | **0.0** | Gaussian blur kernel radius |
 | `augment_prob` | 0.0 | 0.40 | 0.70 | **0.60** | Probability of geometric transforms (rotation, scale, perspective) |
-| `brightness_max` | 0.0 | 10.0 | 30.0 | **7.7** | Max brightness shift in pixel units (±) |
+| `brightness_max` | 0.0 | 10.0 | 30.0 | **3.5** | Max brightness shift in pixel units (±) |
 | `contrast_max` | 0.0 | 0.10 | 0.35 | **0.138** | Max contrast scale factor (±) |
-| `morph_prob` | 0.0 | 0.15 | 0.40 | **0.30** | Erosion/dilation probability |
+| `morph_prob` | 0.0 | 0.15 | 0.40 | **0.15** | Erosion/dilation probability |
 | `rotation_max_angle` | 0° | 2.0° | 5.0° | **3.96°** | Max random rotation angle (±) |
 | `jpeg_quality_range` | — | 80–92 | 50–75 | **65–90** | JPEG re-encode quality range (lower = more artifacts) |
 | `paper_texture_prob` | 0.0 | 0.40 | 0.70 | **0.50** | Probability of applying paper grain texture |
@@ -310,10 +315,11 @@ Each preset controls the same set of parameters. Below is the full breakdown sho
 
 > Skew is capped so a line's vertical drift never exceeds its own height; otherwise long lines would turn into mostly empty space once rescaled.
 
-> **`real-match` design rationale:** Every value is derived from measurements on 50 real Lao administrative document lines:
-> - `noise_intensity = 0.046` ← measured noise σ = 11.75 / 255
+> **`real-match` design rationale:** Most values are derived from measurements on 50 real Lao administrative document lines:
+> - `noise_intensity = 0.0461` ← measured noise σ = 11.75 / 255
 > - `blur_radius = 0.0` ← all 50 real images classified as **sharp** (Laplacian variance > 500)
-> - `brightness_max = 7.7`, `contrast_max = 0.138` ← calibrated from Michelson contrast gap (real: 0.773 vs synthetic: 0.85)
+> - `contrast_max = 0.138` ← calibrated from Michelson contrast gap (real: 0.773 vs synthetic: 0.85)
+> - `brightness_max = 3.5`, `morph_prob = 0.15` ← kept low by hand so text contrast and thin diacritics stay crisp (not measured)
 > - `bg_mean = 252.8`, `bg_std = 6.4` ← measured from real paper background regions
 > - `rotation_max_angle = 3.96°` ← 1.5× the observed skew range (±1.97°) for slight over-coverage
 > - `colored_ink_prob = 0.02` ← 1/50 real lines had red ink
@@ -326,21 +332,21 @@ Each preset runs augmentations in this fixed order (later steps depend on earlie
 1. Base augmentation  →  noise + blur + brightness/contrast + morph (CPU or GPU)
 2. Paper texture      →  add_real_paper_texture()     (shifts background toward real paper mean)
 3. Illumination       →  add_uneven_illumination()    (gradient overlay simulating scanner falloff)
-4. Colored ink        →  add_colored_ink()            (replaces black ink with red/blue/dark-green)
+4. Colored ink        →  add_colored_ink()            (replaces black ink with red / dark-red / blue)
 5. JPEG artifacts     →  add_jpeg_artifacts()         (re-encode at random quality; applied 50% of the time)
 6. Scan noise         →  add_scan_noise_profile()     (correlated sensor noise on top of JPEG)
-7. Rotation           →  random_rotation()            (applied last so fill colour matches background)
+7. Rotation           →  random_rotation()            (with probability augment_prob; last, so the fill matches the background)
 ```
 
 #### Real-World Augmentation Functions
 
 | Function | Preset(s) | Key Parameters | Simulates |
 |----------|-----------|----------------|-----------|
-| `add_jpeg_artifacts` | `scan-mild`, `scan-heavy`, `real-match` | `quality_range=(65,90)` | Scan JPEG compression: blocking, ringing, chroma artefacts |
+| `add_jpeg_artifacts` | `scan-mild`, `scan-heavy`, `real-match` | `quality_range` from the preset (80–92 / 50–75 / 65–90) | Scan JPEG compression: blocking, ringing, chroma artefacts |
 | `add_uneven_illumination` | `scan-mild`, `scan-heavy`, `real-match` | `max_gradient=0.12` (12% brightness swing) | Scanner light falloff; edges darker/lighter than centre |
 | `add_colored_ink` | `scan-mild`, `scan-heavy`, `real-match` | colors: `red`, `dark-red`, `blue` | Colored stamp ink, official document header color lines |
 | `add_real_paper_texture` | `scan-mild`, `scan-heavy`, `real-match` | `bg_mean=252.8`, `bg_std=6.4` | Real paper grain (multi-scale Perlin) vs flat white (255) |
-| `add_scan_noise_profile` | `scan-mild`, `scan-heavy`, `real-match` | `noise_sigma=σ`, 70% Gaussian + 30% correlated | Scanner sensor noise (row/column drift + pixel noise) |
+| `add_scan_noise_profile` | `scan-mild`, `scan-heavy`, `real-match` | `noise_sigma = noise_intensity × 255 × 0.5`, probability `noise_prob × 0.5`; 70% Gaussian + 30% correlated | Scanner sensor noise (row/column drift + pixel noise) |
 
 #### Manual Augmentation Options
 
@@ -567,7 +573,7 @@ tensorboard --logdir data/lao/tensorboard
 Open your browser to `http://localhost:6006` to watch your model learn.
 
 **Training Plots (Static)**
-At the end of training, a `training_plot.png` chart is automatically generated in your model directory showing Loss, CER, WER, execution speeds, and character frequencies over time. You can also manually generate this at any time:
+At the end of training, `training_plot.png` is generated in your model directory: a 6-panel dashboard of line accuracy, CER and WER for training and evaluation. `plot_cer.png`, `plot_loss_combined.png` and `plot_acc_combined.png` are saved next to it (each only when the log has the data). You can also generate them at any time:
 ```bash
 python3 torch_train.py plot --model_name lao
 ```
@@ -581,6 +587,7 @@ Every `--debug_interval` iterations the trainer prints a report like this (this 
               loss      CER      WER   line acc
   train     2.1456   45.21%   78.34%     12.50%   (avg loss 2.3102, 1 batch)
   eval      2.4012   48.10%   80.20%     10.94%   ★ best so far
+           strict CER 51.30% · CluER 63.20%   (CER above is lenient)
   CoER     tone 12.4% · upper 8.1% · lower 3.0% · front 1.2% · rear 2.1%
            cons 5.2% · special 0.0% · Lao num 10.0% · digit 2.0% · space 3.5%
            sym 4.0%
@@ -600,12 +607,12 @@ Every `--debug_interval` iterations the trainer prints a report like this (this 
 | Row | Meaning |
 |-----|---------|
 | `train` | Loss, CER, WER and line accuracy (exact-match lines) on the batch just trained, so it's noisy |
-| `eval` | The same on the validation list. Runs every 5 × `--debug_interval` steps; ★ marks a new best, which is saved as `<model>_best.pt` (train CER is used instead when there is no validation list) |
+| `eval` | The same on the validation list. Runs every 5 × `--debug_interval` steps; ★ marks a new best (by lenient CER), which is saved as `<model>_best.pt` (train CER is used instead when there is no validation list). The line under it gives strict CER and CluER |
 | `CoER` | Component error rate per Lao character class: tone marks, upper / lower / front / rear vowels, consonants, special (ຼ), Lao and Arabic digits, Latin letters, spaces, symbols ([full list](metrics.md)). Shown as `CoER*` between eval runs, when it comes from the training batch only |
 | `model` | RMS of all weights, current learning rate, GPU memory |
 | `samples` | Three training lines. Differences are marked `⟦GT→Pred⟧` (wrong), `⟦−GT⟧` (missing) and `⟦+Pred⟧` (extra) |
 
-Everything is also written to `data/<model>/training.log` (CSV, including `coer_<class>` columns) and to TensorBoard (`CoER/<class>` for eval).
+Everything is also written to `data/<model>/training.log` (CSV, including `coer_<class>`, `train_cer_strict`, `train_cluer`, `eval_cer_strict` and `eval_cluer` columns) and to TensorBoard (`CoER/<class>`, `Eval/CER_strict`, `Eval/CluER`).
 
 ### Evaluation
 
@@ -679,6 +686,7 @@ python3 torch_train.py export --model_name lao
 # Outputs:
 #   data/lao/lao.onnx          → onnxruntime inference
 #   data/lao/lao_model_info.json
+# Both are also copied to data/onnx_model/lao/
 ```
 
 **Note on Export Format:** PyTorch models are directly exported to the ONNX format, which provides a fast, standardized way to run inference in production on CPU or GPU.
@@ -778,11 +786,11 @@ Lao_OCR_Toolkit/
 ├── run.sh                      # Shortcut launcher (plots, compare, benchmark, …)
 ├── fonts/                      # Lao (Phetsarath, Saysettha) and Latin fonts for synthetic data
 ├── tesstrain_core/
-│   ├── model.py                # VGSL spec → nn.Sequential (incl. attention/Conformer layers)
+│   ├── model.py                # VGSL spec → VGSLNet, an nn.Sequential (incl. attention/Conformer/Lcn4 layers)
 │   ├── training.py             # GPU training loop (CTC loss, checkpoints, TensorBoard)
 │   ├── report.py               # Console progress report printed during training
 │   ├── dataset.py              # .lstmf reader + PyTorch Dataset
-│   ├── metrics.py              # CTC decoding, CER/WER, CoER
+│   ├── metrics.py              # CTC decoding, CER (lenient + strict), CluER, WER, CoER
 │   ├── lao_classes.py          # Lao character classes (5 tiers) used by every CoER calculation
 │   ├── evaluate.py, recognize.py, export.py
 │   ├── doc_layout.py           # Deskew, layout analysis, Lao-aware line segmentation
@@ -792,8 +800,10 @@ Lao_OCR_Toolkit/
 │   ├── compare.py, inspection.py, projection.py, plotting.py   # Analysis & figures
 │   └── command_utils.py, utils.py
 ├── experiments/                # Research scripts: benchmarks, cross-comparisons, corpus
+│   ├── EXPERIMENT_PLAN.md      # PhD experiment plan (Step 0 part swaps and later phases)
+│   ├── step0_specs.py          # Step 0 net_specs, parameter table, training commands
 │   └── …                       # enrichment, paper figures (see experiments/README.md)
-├── tests/                      # pytest suite (classes, metrics, report, model, document pipeline)
+├── tests/                      # pytest suite (classes, metrics, report, model, padding, training run, document pipeline)
 ├── .github/workflows/ci.yml    # Lint + tests on every push / pull request
 ├── LSTM_WEIGHTS.md             # Why PyTorch LSTMs have slightly more parameters than Tesseract's
 ├── metrics.md                  # How CER / WER / CoER are computed
@@ -812,9 +822,9 @@ data/
 │   ├── <model>.onnx                # ONNX model
 │   ├── <model>_model_info.json     # Model metadata
 │   ├── training.log                # Training metrics (CSV)
-│   ├── training_plot.png           # Error-rate chart
+│   ├── training_plot.png           # Training dashboard (+ plot_*.png)
 │   ├── charset.json                # Character → index mapping
-│   ├── config.json                 # Training configuration
+│   ├── config.json                 # All training args + run metadata (git commit, seed, versions)
 │   ├── tensorboard/                # TensorBoard event files
 │   └── unicharset                  # Tesseract unicharset
 ├── lao-augmented-v2/               # Generated by gen_data_from_text.py --preset real-match
@@ -822,8 +832,9 @@ data/
 │       ├── validation_report.md
 │       ├── kl_divergence.json
 │       └── comparison_gallery/
+├── onnx_model/<model_name>/        # Copy of each exported .onnx + _model_info.json
 ├── lao-ground-truth-test/          # Test images + .gt.txt pairs
-├── output/                         # PyTorch comparison outputs
+├── comparison/                     # torch_train.py compare outputs (default --output_dir)
 │   ├── plot_global_bar.png
 │   ├── plot_coer_bar.png
 │   ├── plot_demo_grid.png
@@ -1119,13 +1130,13 @@ pip install onnx>=1.14.0 onnxruntime>=1.15.0
 | Command | Description | Key Arguments |
 |---------|-------------|---------------|
 | `unicharset` | Build charset from `.gt.txt` | `--model_name` |
-| `lists` | Create train/eval/valid file lists | `--model_name`, `--ratio 80 10 10` |
+| `lists` | Create train / val / test file lists | `--model_name`, `--ratio 80 10 10` |
 | `proto-model` | Build proto `.traineddata` | `--model_name` |
 | `training` | GPU training | `--optimizer`, `--epochs`, `--batch_size`, `--learning_rate`, `--start_model`, `--start_tess_model` |
 | `export` | Export PyTorch model to ONNX | `--model_name` |
 | `evaluation` | Eval CER / WER / Accuracy | `--model_name`, `--batch_size` |
 | `recognize` | Run OCR inference | `--image`, `--psm`, `--beam_width`, `--wordlist` |
-| `plot` | Training dashboard (7 plots) | `--model_name` |
+| `plot` | Training dashboard (`training_plot.png`, 6 panels) + up to 3 single charts | `--model_name` |
 | `inspection` | Export feature map images | `--model_name`, `--num_samples` |
 | `compare-inspection` | Side-by-side activation maps and predictions across models | `--pairs A:B …`, `--num_samples` |
 | `compare` | Compare logs and evaluate on custom set | `--models`, `--custom_img_dir`, `--custom_realworld_img_dir` |
@@ -1139,9 +1150,9 @@ pip install onnx>=1.14.0 onnxruntime>=1.15.0
 
 ## 📊 Evaluation & Analysis Tools
 
-Three dedicated scripts handle post-training evaluation and model comparison.
-They are independent of `torch_train.py` and can be run at any time after
-training is complete.
+Three tools handle post-training evaluation and model comparison.
+`tesseract_tools.py` and `experiments/compare_cross.py` are standalone scripts;
+`tesstrain_core/compare.py` runs through `torch_train.py compare`.
 
 ---
 
@@ -1164,6 +1175,9 @@ python tesseract_tools.py timereport --model_name lao48cnn32
 
 # CoER + CER/WER alignment diagrams
 python tesseract_tools.py metric_explanation
+
+# One image + per-model prediction grid per sample (→ data/tesseract_comparison/inspection/)
+python tesseract_tools.py inspection
 
 # Run everything
 python tesseract_tools.py all
@@ -1188,8 +1202,9 @@ and produces publication-ready PNGs in `plots/`:
 
 #### Part 2 — Model Comparison (`compare`)
 
-Runs every compiled `.traineddata` model in `data/` against `data/lao-ground-truth-test/`
-and outputs to `data/tesseract_comparison/`:
+Runs the `.traineddata` models listed in `CUSTOM_MODEL_NAMES` (looked up in `tesseract_data/`,
+see the config block below) against `data/lao-ground-truth-test/` and outputs to
+`data/tesseract_comparison/`:
 
 | Output file | Contents |
 |-------------|----------|
