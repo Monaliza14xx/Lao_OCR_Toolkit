@@ -109,7 +109,7 @@ Total ≈ 8–9 working days of effort; M0–M3 is the useful MVP.
 ## 7. Risks and open items found in the code
 
 1. **Resume is not real yet.** `TrainingLogger.__init__` opens `log.csv` with mode `'w'`, so restarting a job erases the history. `_save` stores `iteration` and optimizer state, but the loader's use of them with `--start_model` needs checking. Needed for M6: append mode (or a per-run log file) and a `--resume` flag that restores iteration, optimizer and LR scheduler.
-2. **Batch padding bug** (README Known issue #1): predictions change with batch size for right-to-left / attention layers. Recognize endpoint uses batch size 1 until fixed; show a warning for those specs.
+2. ~~**Batch padding bug**~~ — fixed on `main` (white padding + per-line widths, P0.1): predictions no longer change with batch size, so no batch-size-1 workaround or warning is needed.
 3. **Colab limits:** idle timeout ~90 min, hard cap ~12 h on free tier, tunnel URL changes on every restart. Mitigation: all state on Drive, "reconnect" flow in Settings, `save_interval` default lowered for web runs.
 4. **Security:** public tunnel + code execution. Token required on every route, arguments whitelisted, paths confined to the Drive root, no shell strings.
 5. **Large data transfer:** don't upload gigabytes through the browser. Datasets live on Drive; synthetic generation (`gen_data_from_text.py`) can be a later job type.

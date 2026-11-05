@@ -34,6 +34,7 @@ It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract
 | **Real-World Calibration** | Enrich the corpus from real ground truth and check the synthetic-vs-real gap with KL divergence |
 | **Lao Error Analysis** | Component Error Rate (CoER) per Lao character group: tones, upper/lower vowels, consonants… |
 | **Character Analytics** | Analyze character frequencies, Unicode codepoints, and categories |
+| **Web UI** | Start, watch and stop training on a Colab GPU from your browser ([`webapp/`](webapp/README.md)) |
 
 ---
 
@@ -41,7 +42,7 @@ It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract
 - [✨ Features](#-features)
 - [📦 Installation](#-installation)
   - [Web UI (train on Colab from your browser)](#web-ui-train-on-colab-from-your-browser)
-- [🚀 Quick Start (5 minutes)](#-quick-start-5-minutes)
+- [🚀 Quick Start](#-quick-start)
 - [📝 Synthetic Data Generation](#-synthetic-data-generation)
   - [Augmentation Presets](#augmentation-presets---preset)
   - [Real-World Calibration Workflow](#real-world-calibration-workflow)
@@ -63,7 +64,7 @@ It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract
 - [🐛 Troubleshooting](#-troubleshooting)
 - [📄 Command Reference](#-command-reference)
 - [🛠️ Utilities](#️-utilities)
-- [🧪 Step 0 experiments](#-step-0-experiments)
+- [🔬 Step 0 experiments](#-step-0-experiments)
 - [⚠️ Known Limitations](#️-known-limitations)
 - [🧪 Development](#-development)
 
@@ -121,7 +122,7 @@ uses `unicharset_extractor` when it is installed and a Python fallback otherwise
 python3 -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 ```
 
-### Google Colab (zero-install)
+### Google Colab
 
 ```python
 # PyTorch, NumPy, Pillow, matplotlib and SciPy are pre-installed on Colab
@@ -145,7 +146,7 @@ with live loss, CER and Lao component-error charts. Run `webapp/colab_server.ipy
 
 ---
 
-## 🚀 Quick Start (5 minutes)
+## 🚀 Quick Start
 
 ### Step 1: Prepare ground truth
 
@@ -197,7 +198,7 @@ python3 torch_train.py training --model_name lao \
 python3 torch_train.py export --model_name lao
 ```
 
-That's it! Your model is ready at `data/lao/lao.onnx`.
+Your model is now at `data/lao/lao.onnx` (the export step needs `pip install onnx`, see [Optional dependencies](#3-optional-dependencies)).
 
 ---
 
@@ -271,9 +272,9 @@ python3 gen_data_from_text.py --convert_only --ext png \
 | **Per-sample random seed** (`--seed` + sample index). | Runs are reproducible and parallel workers don't repeat each other's choices. |
 
 #### Output Example:
-- `synth_0000001.tif`: the rendered line (name from `--prefix`, default `synth`; format from `--ext`, default `tif`). Its height follows the font size; the trainer rescales every line to the `net_spec` height.
-- `synth_0000001.gt.txt`: A text file containing exactly what is in the image.
-- `synth_0000001.lstmf`: with `--to_lstmf`.
+- `synth_0000000.tif`: the rendered line (name from `--prefix`, default `synth`; format from `--ext`, default `tif`). Its height follows the font size; the trainer rescales every line to the `net_spec` height.
+- `synth_0000000.gt.txt`: A text file containing exactly what is in the image.
+- `synth_0000000.lstmf`: with `--to_lstmf`.
 
 ---
 
@@ -626,7 +627,7 @@ Everything is also written to `data/<model>/training.log` (CSV, including `coer_
 python3 torch_train.py evaluation --model_name lao --batch_size 32
 ```
 
-> **Note:** The architecture is automatically read from the checkpoint, so evaluation always works even if the checkpoint was trained with a custom `--net_spec`.
+> **Note:** The architecture is read from the checkpoint, so you don't pass `--net_spec` again, even for a custom one.
 >
 > Results don't depend on the batch size: each line is padded with white and decoded over its own
 > frames only. `--padding legacy` scores a model the old way (black padding, full width).
@@ -1023,7 +1024,7 @@ Layer breakdown:
 #### Example Architectures
 
 ```bash
-# Default (Tesseract-compatible)
+# Default (same layout as Tesseract's standard Lao model)
 --net_spec "[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]"
 
 # With BN + Dropout (regularized)
@@ -1161,7 +1162,7 @@ python tesseract_tools.py all
 #### Part 1 — Training Log Plots (`plots`)
 
 Parses every `data/<model>/training.log` and `data/<model>/eval/*.eval.log`
-and produces publication-ready PNGs in `plots/`:
+and produces PNGs in `plots/`:
 
 | Plot file | Contents |
 |-----------|----------|
@@ -1302,7 +1303,7 @@ pip install pytesseract pillow matplotlib numpy
 
 ---
 
-## 🧪 Step 0 experiments
+## 🔬 Step 0 experiments
 
 Step 0 of the PhD plan ([`experiments/EXPERIMENT_PLAN.md`](experiments/EXPERIMENT_PLAN.md)) swaps
 one module of the thesis model B0 = `I64K5C16` at a time: the height collapse ("squash"), the
@@ -1348,7 +1349,7 @@ For the faithful thesis replication (E1a), add `--padding legacy`.
 
 These are known issues in the current code. Keep them in mind when you read or report results.
 
-1. **Batch padding (fixed; `--padding legacy` brings the old behaviour back).** Runs before this fix padded with −1 (black) and gave CTC the full padded width, so models with right-to-left (`Lrx`, `Lbx`) or attention layers saw the padding before the text: in one test 296 of 400 predictions changed between batch size 1 and 64. Now batches are padded with white (+1), and the model receives every line's width: convolutions see the same zeros past the line end as at batch size 1, `Lrx` / `Lbx` start at the line's own end, attention and SE ignore padded columns, and CTC / decoding use the real frame count. In training mode, BatchNorm statistics still include the padding. Numbers from older runs are not directly comparable.
+1. **Runs made before the padding fix are not comparable.** Older versions padded batches with black and gave CTC the full padded width, so models with right-to-left (`Lrx`, `Lbx`) or attention layers changed their predictions with the batch (296 of 400 lines in one test). The current code pads with white and passes every line's width to the model and to CTC, so batch size 1 and 64 give the same predictions. `--padding legacy` reproduces the old behaviour. In training mode, BatchNorm statistics still include the padding.
 2. **CER/WER are lenient by default.** Strict CER and CluER are now reported next to it (see [Evaluation](#evaluation)). `tesstrain_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
 3. **Beam search merges double letters.** The beam decoder (`recognize --beam_width > 1`) doesn't track whether a blank separated two identical characters, so `100` can come out as `10`. Greedy decoding is not affected; `evaluation` and `compare` always decode greedily.
 4. **No learning-rate schedule by default.** The learning rate stays constant unless you pass `--lr_scheduler plateau`.
@@ -1374,7 +1375,7 @@ ruff check .      # lint
 The tests cover the Lao character classes, CER/WER/CoER, strict CER and CluER, the training
 report, text normalization, the VGSL model builder (including `Lcn4` and its fused form),
 batch-size independence of predictions, a short end-to-end training run (seed, `config.json`,
-LR scheduler), the Step 0 spec list, the command-line entry points, and the document
+LR scheduler), the Step 0 spec list, the web UI server, the command-line entry points, and the document
 pipeline end to end (synthetic letter → layout analysis → labelled line crops). The
 document test needs Pillow built with libraqm and is skipped otherwise. GitHub Actions
 runs lint and tests on every push and pull request.
