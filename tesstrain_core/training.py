@@ -10,9 +10,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from .utils import resolve_paths
-from .dataset import TesseractDataset, collate_fn
-from .model import build_model
+from .utils import resolve_paths, set_seed, git_info
+from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
+from .model import build_model, output_lengths
 from .metrics import compute_metrics, compute_mean_rms, TrainingLogger
 from .report import render_progress, COER_KEYS
 from .command_utils import cmd_plot
@@ -21,17 +21,24 @@ from .tesseract_transfer import (
     apply_compatible_pretrained_weights,
 )
 
-def _save(model, optimizer, it, ds, args, path):
+def _save(model, optimizer, it, ds, args, path, scheduler=None):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    torch.save({'iteration': it, 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'charset': ds.charset, 'num_classes': ds.num_classes,
-                'net_spec': args.net_spec, 'model_name': args.model_name}, path)
+    ckpt = {'iteration': it, 'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'charset': ds.charset, 'num_classes': ds.num_classes,
+            'net_spec': args.net_spec, 'model_name': args.model_name,
+            'seed': getattr(args, 'seed', None)}
+    if scheduler is not None:
+        ckpt['scheduler_state_dict'] = scheduler.state_dict()
+    torch.save(ckpt, path)
     print(f"  ✓ Saved: {path}")
 
 def cmd_training(args):
     """Start GPU training with PyTorch."""
     p = resolve_paths(args)
+    seed = getattr(args, 'seed', None)
+    if seed is not None:      # before anything random: model init, shuffling
+        set_seed(seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if getattr(args, 'force_GPU', False) and device.type == 'cpu':
         print("\nError: --force_GPU was specified, but no GPU (CUDA) is available.")
@@ -50,6 +57,7 @@ def cmd_training(args):
     print(f"  Learning Rate:   {args.learning_rate}")
     print(f"  Max Iterations:  {args.max_iterations}")
     print(f"  Target CER:      {args.target_error_rate}")
+    print(f"  Seed:            {seed if seed is not None else 'none (not reproducible)'}")
     print(f"{'=' * 70}\n")
 
     if os.path.exists(p.train_list):
@@ -81,12 +89,19 @@ def cmd_training(args):
             charset = json.load(f)
         print(f"  Loaded charset from {charset_path}")
 
+    # P0.1: white padding + real per-line lengths. --padding legacy = black padding and the
+    # full padded width for CTC / decoding, as in runs made before the fix (E1a faithful arm).
+    legacy_pad = getattr(args, 'padding', 'white') == 'legacy'
+    collate = legacy_collate_fn if legacy_pad else collate_fn
+    if legacy_pad:
+        print("  Padding:         legacy (black, full padded width for CTC)")
+
     train_ds = TesseractDataset(train_files, target_height=target_h, charset=charset)
     eval_loader = None
     if eval_files:
         eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=train_ds.charset)
         eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
-                                  num_workers=args.num_workers, collate_fn=collate_fn,
+                                  num_workers=args.num_workers, collate_fn=collate,
                                   pin_memory=device.type == 'cuda')
 
     with open(charset_path, 'w') as f:
@@ -97,8 +112,9 @@ def cmd_training(args):
         max_iter = int(math.ceil(args.epochs * len(train_ds) / args.batch_size))
         print(f"  Epochs={args.epochs} → max_iterations={max_iter}")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, collate_fn=collate_fn,
+    loader_gen = torch.Generator().manual_seed(seed) if seed is not None else None
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, generator=loader_gen,
+                               num_workers=args.num_workers, collate_fn=collate,
                                pin_memory=device.type == 'cuda', drop_last=True)
 
     spec = args.net_spec
@@ -184,6 +200,18 @@ def cmd_training(args):
             weight_decay=getattr(args, 'weight_decay', 0.0)
         )
         
+    scheduler = None
+    if getattr(args, 'lr_scheduler', 'none') == 'plateau':
+        # Stepped every evaluation (every 5 × --debug_interval iterations) on eval CER, so
+        # --lr_patience counts evaluations, not iterations.
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=args.lr_factor, patience=args.lr_patience, min_lr=args.min_lr)
+        print(f"  LR scheduler:    ReduceLROnPlateau on eval CER (factor {args.lr_factor}, "
+              f"patience {args.lr_patience} evals = {args.lr_patience * args.debug_interval * 5} iters, "
+              f"min_lr {args.min_lr})")
+        if not eval_loader:
+            print("  Warning: no eval list; the LR scheduler will follow the training-batch CER instead.")
+
     ctc_loss_fn = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
     logger = TrainingLogger(p.log_file)
 
@@ -200,8 +228,25 @@ def cmd_training(args):
         except ImportError:
             print("  TensorBoard not available (pip install tensorboard to enable)")
 
+    # Everything needed to say exactly what this run was (P0.4)
+    config = dict(vars(args))
+    config['run'] = {
+        'git': git_info(),
+        'seed': seed,
+        'net_spec_resolved': spec,
+        'num_classes': train_ds.num_classes,
+        'num_params': total_p,
+        'train_lines': len(train_ds),
+        'eval_lines': len(eval_loader.dataset) if eval_loader else 0,
+        'padding': 'legacy' if legacy_pad else 'white',
+        'torch': torch.__version__,
+        'cuda': torch.version.cuda if device.type == 'cuda' else None,
+        'device': torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu',
+        'python': sys.version.split()[0],
+        'started': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    }
     with open(os.path.join(p.output_dir, 'config.json'), 'w') as f:
-        json.dump(vars(args), f, indent=2)
+        json.dump(config, f, indent=2, ensure_ascii=False, default=str)
 
     print(f"{'=' * 70}")
     print("  Training started...")
@@ -219,14 +264,15 @@ def cmd_training(args):
             if iteration >= max_iter: break
             imgs, labels = imgs.to(device), labels.to(device)
 
-            out = model(imgs)
+            out = model(imgs) if legacy_pad else model(imgs, ilens)
             if out.dim() == 4:
                 B, C, H, W = out.shape
                 out = out.permute(0, 3, 1, 2).contiguous().view(B, W, C * H)
 
             lp = F.log_softmax(out, dim=2).permute(1, 0, 2)
             T = lp.shape[0]
-            ail = torch.full((lp.shape[1],), T, dtype=torch.long)
+            ail = (torch.full((lp.shape[1],), T, dtype=torch.long) if legacy_pad
+                   else output_lengths(model, ilens, T))
 
             loss = ctc_loss_fn(lp, labels, ail, tlens)
             optimizer.zero_grad()
@@ -243,28 +289,32 @@ def cmd_training(args):
                 avg_loss = run_loss / run_n
                 sps = (iteration - start_iter) * args.batch_size / elapsed
 
+                train_extra, eval_extra = {}, {}
                 train_cer, train_wer, train_acc, train_coer, train_samples = compute_metrics(
                     model, [(imgs.cpu(), labels.cpu(), ilens, tlens)],
-                    train_ds, device, max_batches=1, collect_samples=3)
+                    train_ds, device, max_batches=1, collect_samples=3, use_real_lengths=not legacy_pad,
+                    details=train_extra)
 
                 eval_cer, eval_wer, eval_acc, eval_loss_val, eval_coer = None, None, None, None, None
                 if eval_loader and iteration % (args.debug_interval * 5) == 0:
                     eval_cer, eval_wer, eval_acc, eval_coer, _ = compute_metrics(
-                        model, eval_loader, train_ds, device)
+                        model, eval_loader, train_ds, device, use_real_lengths=not legacy_pad,
+                        details=eval_extra)
                     # Compute eval loss
                     model.eval()
                     eval_losses = []
                     with torch.no_grad():
-                        for eb, (e_imgs, e_labels, _e_ilens, e_tlens) in enumerate(eval_loader):
+                        for eb, (e_imgs, e_labels, e_ilens, e_tlens) in enumerate(eval_loader):
                             if eb >= 50: break
                             e_imgs, e_labels = e_imgs.to(device), e_labels.to(device)
-                            e_out = model(e_imgs)
+                            e_out = model(e_imgs) if legacy_pad else model(e_imgs, e_ilens)
                             if e_out.dim() == 4:
                                 eB, eC, eH, eW = e_out.shape
                                 e_out = e_out.permute(0, 3, 1, 2).contiguous().view(eB, eW, eC * eH)
                             e_lp = F.log_softmax(e_out, dim=2).permute(1, 0, 2)
                             eT = e_lp.shape[0]
-                            e_ail = torch.full((e_lp.shape[1],), eT, dtype=torch.long)
+                            e_ail = (torch.full((e_lp.shape[1],), eT, dtype=torch.long) if legacy_pad
+                                     else output_lengths(model, e_ilens, eT))
                             e_loss = ctc_loss_fn(e_lp, e_labels, e_ail, e_tlens)
                             eval_losses.append(e_loss.item())
                     model.train()
@@ -285,7 +335,8 @@ def cmd_training(args):
                     loss=loss.item(), avg_loss=avg_loss,
                     train={'cer': train_cer, 'wer': train_wer, 'acc': train_acc},
                     evaluation=None if eval_cer is None else
-                        {'loss': eval_loss_val, 'cer': eval_cer, 'wer': eval_wer, 'acc': eval_acc},
+                        {'loss': eval_loss_val, 'cer': eval_cer, 'wer': eval_wer, 'acc': eval_acc,
+                         'cer_strict': eval_extra.get('cer_strict'), 'cluer': eval_extra.get('cluer')},
                     coer=coer, coer_source=coer_source, is_best=is_best,
                     mean_rms=mean_rms, lr=optimizer.param_groups[0]['lr'],
                     gpu_mem=gpu_mem, gpu_peak=gpu_peak, samples=train_samples))
@@ -300,9 +351,13 @@ def cmd_training(args):
                            eval_wer=round(eval_wer, 6) if eval_wer is not None else '',
                            eval_acc=round(eval_acc, 6) if eval_acc is not None else '',
                            mean_rms=round(mean_rms, 6),
-                           learning_rate=args.learning_rate,
+                           learning_rate=optimizer.param_groups[0]['lr'],
                            gpu_mem_gb=round(gpu_mem, 3), samples_per_sec=round(sps, 1),
                            coer_source=coer_source,
+                           train_cer_strict=round(train_extra['cer_strict'], 6),
+                           train_cluer=round(train_extra['cluer'], 6),
+                           eval_cer_strict=round(eval_extra['cer_strict'], 6) if eval_extra else '',
+                           eval_cluer=round(eval_extra['cluer'], 6) if eval_extra else '',
                            **{f'coer_{k}': round(coer[k], 6) for k in COER_KEYS if coer and k in coer})
 
                 # --- TensorBoard scalars ---
@@ -318,6 +373,8 @@ def cmd_training(args):
                     if eval_cer is not None:
                         tb_writer.add_scalar('Eval/CER',      eval_cer,  iteration)
                         tb_writer.add_scalar('Eval/WER',      eval_wer,  iteration)
+                        tb_writer.add_scalar('Eval/CER_strict', eval_extra['cer_strict'], iteration)
+                        tb_writer.add_scalar('Eval/CluER',    eval_extra['cluer'], iteration)
                     if eval_acc is not None:
                         tb_writer.add_scalar('Eval/Accuracy', eval_acc,  iteration)
                     # Group: CoER (per Lao character class, eval set only)
@@ -326,16 +383,24 @@ def cmd_training(args):
                     # Group: Model
                     tb_writer.add_scalar('Model/Mean_RMS',         mean_rms,           iteration)
                     # Group: System
-                    tb_writer.add_scalar('System/Learning_Rate',   args.learning_rate, iteration)
+                    tb_writer.add_scalar('System/Learning_Rate',   optimizer.param_groups[0]['lr'], iteration)
                     tb_writer.add_scalar('System/GPU_Memory_GB',   gpu_mem,            iteration)
                     tb_writer.add_scalar('System/Samples_per_Sec', sps,                iteration)
                     tb_writer.flush()
 
                 run_loss, run_n = 0.0, 0
 
+                if scheduler is not None and iteration % (args.debug_interval * 5) == 0:
+                    before = optimizer.param_groups[0]['lr']
+                    scheduler.step(eval_cer if eval_cer is not None else train_cer)
+                    after = optimizer.param_groups[0]['lr']
+                    if after < before:
+                        print(f"  ↓ LR reduced {before:.2e} → {after:.2e} (no CER improvement for "
+                              f"{args.lr_patience} evaluations)")
+
                 if is_best:
                     best_cer = score
-                    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_best.pt')
+                    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_best.pt', scheduler)
 
                 cer_check = eval_cer if eval_cer is not None else train_cer
                 if cer_check <= args.target_error_rate:
@@ -344,11 +409,11 @@ def cmd_training(args):
 
             if iteration % args.save_interval == 0:
                 _save(model, optimizer, iteration, train_ds, args,
-                      p.model_output + f'_checkpoint_{iteration}.pt')
+                      p.model_output + f'_checkpoint_{iteration}.pt', scheduler)
 
         if best_cer <= args.target_error_rate: break
 
-    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_final.pt')
+    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_final.pt', scheduler)
     elapsed = time.time() - t0
     print(f"\n{'=' * 70}")
     best = (f"Best CER: {best_cer:.6f}" if best_cer != float('inf') else

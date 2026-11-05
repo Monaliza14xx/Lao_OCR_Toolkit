@@ -6,7 +6,7 @@ from datetime import datetime
 import torch
 
 # Lao character classes for CoER live in lao_classes.py (shared with the standalone scripts)
-from .lao_classes import LAO_COMPONENT_MAP, LAO_CLASSES, get_component_type, fold_sara_am  # noqa: F401
+from .lao_classes import LAO_COMPONENT_MAP, LAO_CLASSES, get_component_type, fold_sara_am, split_clusters  # noqa: F401
 
 import unicodedata
 
@@ -71,6 +71,34 @@ def edit_distance(s1, s2):
             cur.append(min(prev[j + 1] + 1, cur[j] + 1, prev[j] + cost))
         prev = cur
     return prev[-1]
+
+def levenshtein(a, b):
+    """Plain edit distance (unit costs, no normalisation) between two strings or lists."""
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def strict_cer_counts(pred, gt):
+    """(errors, GT characters) for strict CER: plain Levenshtein on the raw strings (P0.2)."""
+    return levenshtein(pred, gt), len(gt)
+
+
+def cluster_error_counts(pred, gt):
+    """(errors, GT clusters) for CluER: Levenshtein over clusters (consonant + its marks = 1 unit).
+
+    A missed tone mark costs 1 of ~15 characters in CER but 1 of ~8 clusters here, so errors
+    in the stacked tiers are not hidden by the many easy baseline characters.
+    """
+    g = split_clusters(gt)
+    return levenshtein(split_clusters(pred), g), len(g)
+
 
 def ctc_greedy_decode(output):
     """Greedy CTC decode: [T, C] → list of label indices."""
@@ -201,7 +229,18 @@ def compute_component_metrics(edits):
             
     return stats
 
-def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samples=0):
+def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samples=0,
+                    use_real_lengths=True, details=None):
+    """CER / WER / line accuracy / CoER of a model over (part of) a loader.
+
+    use_real_lengths: decode only the frames that belong to each line (P0.1), so a line's
+    prediction doesn't depend on the padding added for wider lines in its batch.
+    False reproduces the old behaviour (decode the whole padded width).
+    details: optional dict, filled with 'cer_strict' (plain Levenshtein, no normalisation),
+    'cluer' (cluster error rate) and the counts behind them. The returned CER stays the
+    lenient one, so existing callers are unchanged.
+    """
+    from .model import output_lengths
     model.eval()
     total_char_dist, total_chars = 0, 0
     total_wer_dist, total_wer_words = 0, 0
@@ -209,19 +248,23 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
     coer_stats = {cat: {'total': 0, 'errors': 0} for cat in LAO_COMPONENT_MAP.keys()}
     coer_stats['other'] = {'total': 0, 'errors': 0}
     
+    strict_err = strict_n = clu_err = clu_n = 0
     all_pairs = []
     batches = 0
     with torch.no_grad():
-        for imgs, labels, _ilens, tlens in loader:
+        for imgs, labels, ilens, tlens in loader:
             if batches >= max_batches: break
             imgs = imgs.to(device)
-            out = model(imgs)
+            out = model(imgs, ilens) if use_real_lengths else model(imgs)
             if out.dim() == 4:
                 B, C, H, W = out.shape
                 out = out.permute(0, 3, 1, 2).contiguous().view(B, W, C * H)
+            T = out.shape[1]
+            olens = (output_lengths(model, ilens, T) if use_real_lengths
+                     else torch.full((out.shape[0],), T, dtype=torch.long))
             off = 0
             for i in range(out.shape[0]):
-                dec = ctc_greedy_decode(out[i])
+                dec = ctc_greedy_decode(out[i, :olens[i].item()])
                 gt = labels[off:off + tlens[i].item()].cpu().tolist()
                 off += tlens[i].item()
                 pred_s = dataset.decode_labels(dec)
@@ -231,6 +274,12 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
                 total_char_dist += edit_distance(pred_s, gt_s)
                 total_chars += max(len(gt_s), 1)
                 
+                # Strict CER and CluER (P0.2)
+                e, n = strict_cer_counts(pred_s, gt_s)
+                strict_err += e; strict_n += max(n, 1)
+                e, n = cluster_error_counts(pred_s, gt_s)
+                clu_err += e; clu_n += max(n, 1)
+
                 # WER (Word)
                 total_wer_dist += edit_distance(pred_s.split(), gt_s.split())
                 total_wer_words += len(gt_s.split())
@@ -252,6 +301,10 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
     cer = total_char_dist / max(total_chars, 1)
     wer = total_wer_dist / max(total_wer_words, 1)
     acc = total_correct / max(total_samples, 1)
+    if details is not None:
+        details.update(cer_strict=strict_err / max(strict_n, 1), cluer=clu_err / max(clu_n, 1),
+                       strict_errors=strict_err, chars=strict_n, cluster_errors=clu_err,
+                       clusters=clu_n, lines=total_samples)
     
     # Calculate CoER results
     coer_results = {}
@@ -279,7 +332,8 @@ class TrainingLogger:
               'train_cer', 'train_wer', 'train_acc',
               'eval_cer', 'eval_wer', 'eval_acc',
               'mean_rms', 'learning_rate', 'gpu_mem_gb', 'samples_per_sec',
-              'coer_source'] + [f'coer_{k}' for k in list(LAO_COMPONENT_MAP) + ['other']]
+              'coer_source'] + [f'coer_{k}' for k in list(LAO_COMPONENT_MAP) + ['other']] + [
+              'train_cer_strict', 'train_cluer', 'eval_cer_strict', 'eval_cluer']
 
     def __init__(self, log_file):
         self.log_file = log_file
@@ -301,7 +355,8 @@ class TrainingLogger:
                     if row.get(k): row[k] = int(row[k])
                 for k in ['train_loss', 'eval_loss', 'train_cer', 'eval_cer',
                            'train_wer', 'eval_wer', 'train_acc', 'eval_acc', 
-                           'learning_rate', 'gpu_mem_gb', 'samples_per_sec', 'mean_rms']:
+                           'learning_rate', 'gpu_mem_gb', 'samples_per_sec', 'mean_rms',
+                           'train_cer_strict', 'train_cluer', 'eval_cer_strict', 'eval_cluer']:
                     if row.get(k) is not None and row[k] != '':
                         row[k] = float(row[k])
                 entries.append(row)

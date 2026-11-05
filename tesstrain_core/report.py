@@ -139,6 +139,9 @@ def render_progress(*, iteration, max_iter, epoch, sps, elapsed, iters_done,
         out.append(f"  {'eval':7s}{evaluation['loss']:9.4f}{_pct(evaluation['cer']):>9s}"
                    f"{_pct(evaluation['wer']):>9s}{_pct(evaluation['acc']):>11s}"
                    + ('   ★ best so far' if is_best else ''))
+        if evaluation.get('cer_strict') is not None:
+            out.append(f"  {'':7s}  strict CER {evaluation['cer_strict'] * 100:.2f}%"
+                       f" · CluER {evaluation['cluer'] * 100:.2f}%   (CER above is lenient)")
     elif is_best:
         out[-1] += '  ★'
 

@@ -10,11 +10,38 @@ class CollapseH(nn.Module):
             return x.permute(0, 3, 1, 2).contiguous().view(B, W, C * H)
         return x
 
+def _seq_mask(lengths, T, device):
+    """(B, T) bool, True on the real frames of each line."""
+    return torch.arange(T, device=device).unsqueeze(0) < lengths.to(device).clamp(max=T).unsqueeze(1)
+
+
+def _reverse_within(x, lengths):
+    """Reverse each sequence of x (B, T, C) inside its own length; padding stays at the end."""
+    T = x.size(1)
+    t = torch.arange(T, device=x.device).unsqueeze(0)
+    L = lengths.to(x.device).clamp(1, T).unsqueeze(1)
+    idx = torch.where(t < L, L - 1 - t, t)
+    return x.gather(1, idx.unsqueeze(-1).expand_as(x))
+
+
+def _packed_lstm(lstm, x, lengths):
+    """Run a (bidirectional) LSTM on the real frames only; padded outputs are 0."""
+    T = x.size(1)
+    L = lengths.cpu().clamp(1, T)
+    packed = nn.utils.rnn.pack_padded_sequence(x, L, batch_first=True, enforce_sorted=False)
+    out, _ = lstm(packed)
+    return nn.utils.rnn.pad_packed_sequence(out, batch_first=True, total_length=T)[0]
+
+
 class BiLSTM(nn.Module):
+    uses_lengths = True
+
     def __init__(self, inp, hid):
         super().__init__()
         self.lstm = nn.LSTM(inp, hid, batch_first=True, bidirectional=True)
-    def forward(self, x):
+    def forward(self, x, lengths=None):
+        if lengths is not None:
+            return _packed_lstm(self.lstm, x, lengths)
         return self.lstm(x)[0]
 
 class BiLSTMProjection(nn.Module):
@@ -26,12 +53,14 @@ class BiLSTMProjection(nn.Module):
     Input : (B, W, in)
     Output: (B, W, out)
     """
+    uses_lengths = True
+
     def __init__(self, inp, hid, out):
         super().__init__()
         self.lstm = nn.LSTM(inp, hid, batch_first=True, bidirectional=True)
         self.projection = nn.Linear(hid * 2, out)
-    def forward(self, x):
-        h, _ = self.lstm(x)
+    def forward(self, x, lengths=None):
+        h = _packed_lstm(self.lstm, x, lengths) if lengths is not None else self.lstm(x)[0]
         return self.projection(h)
 
 class FwdLSTM(nn.Module):
@@ -42,10 +71,14 @@ class FwdLSTM(nn.Module):
         return self.lstm(x)[0]
 
 class RevLSTM(nn.Module):
+    uses_lengths = True
+
     def __init__(self, inp, hid):
         super().__init__()
         self.lstm = nn.LSTM(inp, hid, batch_first=True)
-    def forward(self, x):
+    def forward(self, x, lengths=None):
+        if lengths is not None:      # start at each line's own last frame, not at the padding
+            return _reverse_within(self.lstm(_reverse_within(x, lengths))[0], lengths)
         return torch.flip(self.lstm(torch.flip(x, [1]))[0], [1])
 
 class SumLSTM(nn.Module):
@@ -234,15 +267,18 @@ class HorizontalSelfAttention(nn.Module):
     Applies multi-head self-attention across the width steps of a 1D sequence (B, W, C),
     allowing global context modeling across the entire text line.
     """
+    uses_lengths = True
+
     def __init__(self, inp_c: int, num_heads: int = 4, dropout: float = 0.1):
         super().__init__()
         gcd_heads = math.gcd(inp_c, num_heads)
         self.mha = nn.MultiheadAttention(embed_dim=inp_c, num_heads=gcd_heads, dropout=dropout, batch_first=True)
         self.norm = nn.LayerNorm(inp_c)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, lengths=None) -> torch.Tensor:
         if x.dim() == 3:
-            attn_out, _ = self.mha(x, x, x)
+            pad = None if lengths is None else ~_seq_mask(lengths, x.size(1), x.device)
+            attn_out, _ = self.mha(x, x, x, key_padding_mask=pad)
             return self.norm(x + attn_out)
         return x
 
@@ -282,18 +318,158 @@ class MonotonicConformerBlock(nn.Module):
         )
         self.out_norm = nn.LayerNorm(inp_c)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    uses_lengths = True
+
+    def forward(self, x: torch.Tensor, lengths=None) -> torch.Tensor:
         if x.dim() == 3:
-            x_norm = self.conv_norm(x)
-            x_conv = self.conv_1d(x_norm.permute(0, 2, 1)).permute(0, 2, 1)
-            x = x + x_conv
+            keep = None if lengths is None else _seq_mask(lengths, x.size(1), x.device)
+            h = self.conv_norm(x).permute(0, 2, 1)
+            for i, layer in enumerate(self.conv_1d):
+                if i == 2 and keep is not None:          # depthwise conv: zeros past the line end
+                    h = h * keep.unsqueeze(1)
+                h = layer(h)
+            x = x + h.permute(0, 2, 1)
             x_norm2 = self.attn_norm(x)
-            attn_out, _ = self.mha(x_norm2, x_norm2, x_norm2)
+            attn_out, _ = self.mha(x_norm2, x_norm2, x_norm2,
+                                   key_padding_mask=None if keep is None else ~keep)
             x = x + attn_out
             x = x + self.ffn(x)
             return self.out_norm(x)
         return x
 
+
+
+# ── LCNetV4-style CNN stage: Lcn4[s],<C>,<depth>[,<sy>,<sx>] ─────────────────────────────────
+
+def _fuse_conv_bn(kernel, bn):
+    """(kernel, bn) → (kernel', bias') of the single conv that equals conv followed by eval-mode BN."""
+    std = (bn.running_var + bn.eps).sqrt()
+    t = (bn.weight / std).reshape(-1, 1, 1, 1)
+    return kernel * t, bn.bias - bn.running_mean * bn.weight / std
+
+
+class RepDWConv(nn.Module):
+    """Token mixer: 3×3 depthwise conv with training-time reparameterisation (RepVGG-DW style).
+
+    Training: BN(DW3×3(x)) + BN(DW1×1(x)) + BN(x). reparameterize() fuses the three branches
+    into one 3×3 depthwise conv with bias, which gives the same output in eval mode.
+    """
+
+    def __init__(self, c):
+        super().__init__()
+        self.conv3 = nn.Conv2d(c, c, 3, 1, 1, groups=c, bias=False)
+        self.bn3 = nn.BatchNorm2d(c)
+        self.conv1 = nn.Conv2d(c, c, 1, 1, 0, groups=c, bias=False)
+        self.bn1 = nn.BatchNorm2d(c)
+        self.bn_id = nn.BatchNorm2d(c)
+        self.fused = None
+
+    def forward(self, x):
+        if self.fused is not None:
+            return self.fused(x)
+        return self.bn3(self.conv3(x)) + self.bn1(self.conv1(x)) + self.bn_id(x)
+
+    @torch.no_grad()
+    def reparameterize(self):
+        if self.fused is not None:
+            return
+        c = self.conv3.in_channels
+        k3, b3 = _fuse_conv_bn(self.conv3.weight, self.bn3)
+        k1, b1 = _fuse_conv_bn(nn.functional.pad(self.conv1.weight, (1, 1, 1, 1)), self.bn1)
+        ident = torch.zeros_like(self.conv3.weight)
+        ident[:, 0, 1, 1] = 1.0
+        ki, bi = _fuse_conv_bn(ident, self.bn_id)
+        self.fused = nn.Conv2d(c, c, 3, 1, 1, groups=c, bias=True).to(self.conv3.weight.device)
+        self.fused.weight.copy_(k3 + k1 + ki)
+        self.fused.bias.copy_(b3 + b1 + bi)
+        for name in ('conv3', 'bn3', 'conv1', 'bn1', 'bn_id'):
+            delattr(self, name)
+
+
+class SqueezeExcite(nn.Module):
+    """SE over the line. With widths, the mean only covers each line's real columns."""
+
+    def __init__(self, c, reduction=4):
+        super().__init__()
+        mid = max(8, c // reduction)
+        self.fc1 = nn.Conv2d(c, mid, 1)
+        self.fc2 = nn.Conv2d(mid, c, 1)
+
+    def forward(self, x, widths=None):
+        if widths is None:
+            s = x.mean((2, 3), keepdim=True)
+        else:
+            keep = (torch.arange(x.size(3), device=x.device).unsqueeze(0)
+                    < widths.to(x.device).unsqueeze(1)).to(x.dtype)[:, None, None, :]
+            s = (x * keep).sum((2, 3), keepdim=True) / (keep.sum((2, 3), keepdim=True) * x.size(2))
+        return x * nn.functional.hardsigmoid(self.fc2(nn.functional.relu(self.fc1(s))))
+
+
+class Lcn4Block(nn.Module):
+    """RepDW 3×3 token mixer (+ optional SE), then a residual 1×1 channel mixer:
+    x + BN0(PW(GELU(BN(PW_expand×2(x))))) with the last BN zero-initialised, so a new block
+    starts as (almost) the identity."""
+
+    def __init__(self, c, se=False):
+        super().__init__()
+        self.token = RepDWConv(c)
+        self.se = SqueezeExcite(c) if se else None
+        self.channel = nn.Sequential(
+            nn.Conv2d(c, 2 * c, 1, bias=False), nn.BatchNorm2d(2 * c), nn.GELU(),
+            nn.Conv2d(2 * c, c, 1, bias=False), nn.BatchNorm2d(c))
+        nn.init.zeros_(self.channel[-1].weight)
+
+    def forward(self, x, widths=None):
+        if widths is not None:                 # 3×3 conv sees zeros past the line end
+            x = _mask_width(x, widths, 0.0)
+        x = self.token(x)
+        if self.se is not None:
+            x = self.se(x, widths)
+        return x + self.channel(x)
+
+
+class Lcn4Stage(nn.Module):
+    """Lcn4[s],<C>,<depth>[,<sy>,<sx>]: one LCNetV4-style CNN stage.
+
+    If the channel count changes or a stride is given, a 3×3 conv (stride sy, sx) + BN + GELU
+    goes first; then <depth> Lcn4Block. 's' turns on SE. The output stays 4-D (B, C, H, W):
+    nothing pools the height, so any collapse token (Lfys, Atys, Matys, Hybys) or flatten
+    can follow. (2,1) strides halve the height and keep every column (frame) for CTC.
+    """
+    uses_lengths = True
+
+    def __init__(self, in_c, c, depth, stride=(1, 1), se=False):
+        super().__init__()
+        self.stride = tuple(stride)
+        self.down = None
+        if in_c != c or self.stride != (1, 1):
+            self.down = nn.Sequential(nn.Conv2d(in_c, c, 3, self.stride, 1, bias=False),
+                                      nn.BatchNorm2d(c), nn.GELU())
+        self.blocks = nn.ModuleList(Lcn4Block(c, se) for _ in range(depth))
+
+    def out_width(self, w):
+        return _conv_like_width(w, 3, self.stride, 1) if self.down is not None else w
+
+    def forward(self, x, lengths=None):
+        w = lengths
+        if self.down is not None:
+            if w is not None:
+                x = _mask_width(x, w, 0.0)
+            x = self.down(x)
+            if w is not None:
+                w = self.out_width(w).clamp(1, x.size(3))
+        for blk in self.blocks:
+            x = blk(x, w)
+        return x
+
+
+def reparameterize_model(model):
+    """Fuse every reparameterisable branch (Lcn4 token mixers) for inference. Call after
+    model.eval(); the fused model gives the same outputs in eval mode. Returns the model."""
+    for m in list(model.modules()):
+        if hasattr(m, 'reparameterize') and m is not model:
+            m.reparameterize()
+    return model
 
 
 class Permute1DForBN(nn.Module):
@@ -305,8 +481,93 @@ class Permute1DForBN(nn.Module):
     def forward(self, x):
         return self.bn(x.permute(0, 2, 1)).permute(0, 2, 1)
 
+def _pair(v):
+    return tuple(v) if isinstance(v, (tuple, list)) else (v, v)
+
+
+def _conv_like_width(w, kernel, stride, padding, dilation=1):
+    """Width after a Conv2d / MaxPool2d (floor mode), given the input width tensor w."""
+    kx, sx, px, dx = _pair(kernel)[1], _pair(stride)[1], _pair(padding)[1], _pair(dilation)[1]
+    return torch.div(w + 2 * px - dx * (kx - 1) - 1, sx, rounding_mode='floor') + 1
+
+
+def module_out_width(module, w):
+    """Width (sequence length) that `module` produces from input width(s) w (LongTensor).
+
+    Handles Conv2d, MaxPool2d and any module that defines ``out_width(w)`` (the Lcn4 block).
+    Containers are walked in order; every other layer keeps the width unchanged.
+    """
+    if hasattr(module, 'out_width'):
+        return module.out_width(w)
+    if isinstance(module, nn.Conv2d):
+        return _conv_like_width(w, module.kernel_size, module.stride, module.padding, module.dilation)
+    if isinstance(module, nn.MaxPool2d):
+        if module.ceil_mode:
+            raise NotImplementedError('ceil_mode pooling is not used by the VGSL parser')
+        return _conv_like_width(w, module.kernel_size, module.stride or module.kernel_size,
+                                module.padding, module.dilation)
+    if isinstance(module, nn.Sequential):
+        for child in module:
+            w = module_out_width(child, w)
+    return w
+
+
+def output_lengths(model, input_widths, max_len=None):
+    """Real number of output frames per line, for CTC and decoding.
+
+    input_widths: the unpadded image widths of the batch (the ``ilens`` from collate_fn).
+    Frames that only see padding are excluded, so a line's loss and its decoded text do
+    not depend on how wide the other lines in its batch are. Clamped to [1, max_len].
+    """
+    w = torch.as_tensor(input_widths, dtype=torch.long).cpu()
+    w = module_out_width(model, w)
+    w = w.clamp(min=1)
+    if max_len is not None:
+        w = w.clamp(max=max_len)
+    return w
+
+
+def _mask_width(x, w, fill):
+    """Set the columns of a (B, C, H, W) map beyond each line's width w to `fill`."""
+    keep = (torch.arange(x.size(3), device=x.device).unsqueeze(0) < w.to(x.device).unsqueeze(1))
+    return x.masked_fill(~keep[:, None, None, :], fill)
+
+
+class VGSLNet(nn.Sequential):
+    """nn.Sequential that can also take the real width of every line in the batch.
+
+    ``model(x)`` behaves exactly like nn.Sequential (old behaviour, ONNX export, single images).
+    ``model(x, widths)`` makes each line's output independent of the padding (P0.1):
+    convolutions and pools see the same zeros / -inf past the line end as at batch size 1,
+    right-to-left and bidirectional LSTMs start at the line's own end, attention ignores
+    padded frames. State-dict keys are the same as a plain nn.Sequential.
+    """
+
+    def reparameterize(self):
+        """Fuse Lcn4 training branches for inference (see reparameterize_model)."""
+        return reparameterize_model(self)
+
+    def forward(self, x, widths=None):
+        if widths is None:
+            return super().forward(x)
+        w = torch.as_tensor(widths, dtype=torch.long).cpu()
+        for layer in self:
+            if x.dim() == 4 and w.numel():
+                if isinstance(layer, nn.Conv2d) and _pair(layer.padding)[1] > 0:
+                    x = _mask_width(x, w, 0.0)
+                elif isinstance(layer, nn.MaxPool2d) and _pair(layer.padding)[1] > 0:
+                    x = _mask_width(x, w, float('-inf'))
+            if getattr(layer, 'uses_lengths', False):
+                T = x.size(3) if x.dim() == 4 else x.size(1)
+                x = layer(x, lengths=w.clamp(1, T))
+            else:
+                x = layer(x)
+            w = module_out_width(layer, w)
+        return x
+
+
 def build_model(spec, num_classes):
-    """Parse VGSL NET_SPEC → nn.Sequential."""
+    """Parse VGSL NET_SPEC → VGSLNet (an nn.Sequential; see VGSLNet for the widths argument)."""
     spec = spec.strip().strip('[]')
     tokens = spec.split()
     layers, in_c, cur_h, is_seq, rnn_in = [], 1, 48, False, 0
@@ -339,6 +600,17 @@ def build_model(spec, num_classes):
             py, px = int(m.group(1)), int(m.group(2))
             layers.append(nn.MaxPool2d((py, px), stride=(py, px)))
             cur_h //= py
+            continue
+        # ── LCNetV4-style stage: Lcn4[s],<C>,<depth>[,<sy>,<sx>] ──
+        m = re.match(r'^Lcn4(s?),(\d+),(\d+)(?:,(\d+),(\d+))?$', tok)
+        if m:
+            c, depth = int(m.group(2)), int(m.group(3))
+            stride = (int(m.group(4)), int(m.group(5))) if m.group(4) else (1, 1)
+            stage = Lcn4Stage(in_c, c, depth, stride, se=m.group(1) == 's')
+            layers.append(stage)
+            if stage.down is not None:
+                cur_h = (cur_h + 2 - 3) // stride[0] + 1
+            in_c = c
             continue
         # ── Asymmetric MaxPool: Mpa<ky>,<kx>,<sy>,<sx>,<py>,<px> ──
         m = re.match(r'^Mpa(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)$', tok)
@@ -460,4 +732,4 @@ def build_model(spec, num_classes):
             continue
         print(f"  Warning: Unknown token '{tok}'")
 
-    return nn.Sequential(*layers)
+    return VGSLNet(*layers)

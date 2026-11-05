@@ -125,8 +125,33 @@ class TesseractDataset(Dataset):
         labels = self.encode_text(transcription) or [1]
         return t, torch.tensor(labels, dtype=torch.long), t.shape[2], len(labels)
 
-def collate_fn(batch):
-    imgs, labels, ilens, tlens = zip(*batch)
-    max_w = max(i.shape[2] for i in imgs)
-    padded = [F.pad(i, (0, max_w - i.shape[2]), value=-1.0) for i in imgs]
-    return torch.stack(padded), torch.cat(labels), torch.tensor(ilens, dtype=torch.long), torch.tensor(tlens, dtype=torch.long)
+# Images are scaled so white paper = +1 and black ink = -1 (see __getitem__).
+PAD_WHITE = 1.0
+PAD_BLACK = -1.0   # the value used before the P0.1 fix; kept for --padding legacy
+
+
+class PadCollate:
+    """Collate (img, labels, width, label_len) samples, right-padding images to the widest one.
+
+    White padding (the default) continues the paper background, so layers that read the line
+    right-to-left (Lrx, Lbx) or look at the whole line (attention, SE) do not start on a black
+    bar. Pass PAD_BLACK to reproduce runs made before this fix. A class rather than a closure
+    so DataLoader workers can pickle it (spawn start method on macOS / Windows).
+    """
+    def __init__(self, pad_value=PAD_WHITE):
+        self.pad_value = pad_value
+
+    def __call__(self, batch):
+        imgs, labels, ilens, tlens = zip(*batch)
+        max_w = max(i.shape[2] for i in imgs)
+        padded = [F.pad(i, (0, max_w - i.shape[2]), value=self.pad_value) for i in imgs]
+        return (torch.stack(padded), torch.cat(labels),
+                torch.tensor(ilens, dtype=torch.long), torch.tensor(tlens, dtype=torch.long))
+
+
+def make_collate_fn(pad_value=PAD_WHITE):
+    return PadCollate(pad_value)
+
+
+collate_fn = make_collate_fn(PAD_WHITE)
+legacy_collate_fn = make_collate_fn(PAD_BLACK)
