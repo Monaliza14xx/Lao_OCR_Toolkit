@@ -1,0 +1,24 @@
+{
+  "name": "lao-ocr-webui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "typecheck": "nuxt typecheck",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@nuxt/ui": "^4.12.0",
+    "chart.js": "^4.6.1",
+    "nuxt": "^4.6.4",
+    "tailwindcss": "^4.3.4",
+    "vue-chartjs": "^5.3.4"
+  },
+  "devDependencies": {
+    "@iconify-json/lucide": "^1.2.151",
+    "typescript": "^6.0.3",
+    "vue-tsc": "^3.3.14"
+  }
+}
