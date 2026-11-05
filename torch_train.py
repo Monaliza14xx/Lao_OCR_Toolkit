@@ -153,6 +153,9 @@ Get help for a subcommand:
                    default='[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]',
                    metavar='SPEC',
                    help='VGSL network architecture string')
+    g.add_argument('--seed', type=int, default=None, metavar='N',
+                   help='Seed torch / numpy / random and use deterministic cuDNN, for repeatable runs '
+                        '(default: none = not seeded, as before). --random_seed only seeds the auto train/eval split')
     g = p.add_argument_group('optimizer')
     g.add_argument('--optimizer', default='Adam', choices=['Adam', 'SGD'], metavar='{Adam,SGD}',
                    help='Optimizer algorithm                        (default: Adam)')
@@ -162,6 +165,15 @@ Get help for a subcommand:
                    help='Momentum - only used with SGD              (default: 0.9)')
     g.add_argument('--weight_decay', type=float, default=0.0, metavar='WD',
                    help='L2 weight decay penalty                    (default: 0.0)')
+    g.add_argument('--lr_scheduler', default='none', choices=['none', 'plateau'],
+                   help='none = constant LR (default); plateau = ReduceLROnPlateau on eval CER')
+    g.add_argument('--lr_factor', type=float, default=0.5, metavar='F',
+                   help='plateau: multiply the LR by F when eval CER stops improving (default: 0.5)')
+    g.add_argument('--lr_patience', type=int, default=5, metavar='N',
+                   help='plateau: evaluations without improvement before reducing; one evaluation '
+                        'runs every 5 x --debug_interval iterations (default: 5)')
+    g.add_argument('--min_lr', type=float, default=1e-5, metavar='LR',
+                   help='plateau: lower bound for the LR (default: 1e-5)')
     g.add_argument('--padding', default='white', choices=['white', 'legacy'],
                    help='Batch padding: white = pad with paper colour and use each line\'s real length for '
                         'CTC/decoding; legacy = black padding over the full width, as before the fix (default: white)')

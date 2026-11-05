@@ -38,3 +38,36 @@ def resolve_paths(args):
     p.test_list  = os.path.join(p.output_dir, 'list.test')
     os.makedirs(p.output_dir, exist_ok=True)
     return p
+
+
+def set_seed(seed):
+    """Seed python, numpy and torch (CPU + CUDA) and ask for deterministic kernels.
+
+    Some CUDA ops (e.g. CTC loss backward) have no deterministic version; torch then warns
+    instead of failing (warn_only=True), so GPU runs are reproducible only up to those ops.
+    """
+    import random
+    import numpy as np
+    import torch
+    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')   # needed for deterministic cuBLAS
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def git_info(path=None):
+    """{'commit': sha or None, 'dirty': bool or None} of the repository holding this code."""
+    import subprocess
+    cwd = path or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=cwd, capture_output=True,
+                             text=True, timeout=10).stdout.strip() or None
+        status = subprocess.run(['git', 'status', '--porcelain', '--untracked-files=no'], cwd=cwd,
+                                capture_output=True, text=True, timeout=10).stdout
+        return {'commit': sha, 'dirty': bool(status.strip()) if sha else None}
+    except (OSError, subprocess.SubprocessError):
+        return {'commit': None, 'dirty': None}

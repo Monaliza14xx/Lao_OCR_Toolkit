@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from .utils import resolve_paths
+from .utils import resolve_paths, set_seed, git_info
 from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
 from .model import build_model, output_lengths
 from .metrics import compute_metrics, compute_mean_rms, TrainingLogger
@@ -21,17 +21,24 @@ from .tesseract_transfer import (
     apply_compatible_pretrained_weights,
 )
 
-def _save(model, optimizer, it, ds, args, path):
+def _save(model, optimizer, it, ds, args, path, scheduler=None):
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    torch.save({'iteration': it, 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'charset': ds.charset, 'num_classes': ds.num_classes,
-                'net_spec': args.net_spec, 'model_name': args.model_name}, path)
+    ckpt = {'iteration': it, 'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'charset': ds.charset, 'num_classes': ds.num_classes,
+            'net_spec': args.net_spec, 'model_name': args.model_name,
+            'seed': getattr(args, 'seed', None)}
+    if scheduler is not None:
+        ckpt['scheduler_state_dict'] = scheduler.state_dict()
+    torch.save(ckpt, path)
     print(f"  ✓ Saved: {path}")
 
 def cmd_training(args):
     """Start GPU training with PyTorch."""
     p = resolve_paths(args)
+    seed = getattr(args, 'seed', None)
+    if seed is not None:      # before anything random: model init, shuffling
+        set_seed(seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if getattr(args, 'force_GPU', False) and device.type == 'cpu':
         print("\nError: --force_GPU was specified, but no GPU (CUDA) is available.")
@@ -50,6 +57,7 @@ def cmd_training(args):
     print(f"  Learning Rate:   {args.learning_rate}")
     print(f"  Max Iterations:  {args.max_iterations}")
     print(f"  Target CER:      {args.target_error_rate}")
+    print(f"  Seed:            {seed if seed is not None else 'none (not reproducible)'}")
     print(f"{'=' * 70}\n")
 
     if os.path.exists(p.train_list):
@@ -104,7 +112,8 @@ def cmd_training(args):
         max_iter = int(math.ceil(args.epochs * len(train_ds) / args.batch_size))
         print(f"  Epochs={args.epochs} → max_iterations={max_iter}")
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+    loader_gen = torch.Generator().manual_seed(seed) if seed is not None else None
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, generator=loader_gen,
                                num_workers=args.num_workers, collate_fn=collate,
                                pin_memory=device.type == 'cuda', drop_last=True)
 
@@ -191,6 +200,18 @@ def cmd_training(args):
             weight_decay=getattr(args, 'weight_decay', 0.0)
         )
         
+    scheduler = None
+    if getattr(args, 'lr_scheduler', 'none') == 'plateau':
+        # Stepped every evaluation (every 5 × --debug_interval iterations) on eval CER, so
+        # --lr_patience counts evaluations, not iterations.
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=args.lr_factor, patience=args.lr_patience, min_lr=args.min_lr)
+        print(f"  LR scheduler:    ReduceLROnPlateau on eval CER (factor {args.lr_factor}, "
+              f"patience {args.lr_patience} evals = {args.lr_patience * args.debug_interval * 5} iters, "
+              f"min_lr {args.min_lr})")
+        if not eval_loader:
+            print("  Warning: no eval list; the LR scheduler will follow the training-batch CER instead.")
+
     ctc_loss_fn = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
     logger = TrainingLogger(p.log_file)
 
@@ -207,8 +228,25 @@ def cmd_training(args):
         except ImportError:
             print("  TensorBoard not available (pip install tensorboard to enable)")
 
+    # Everything needed to say exactly what this run was (P0.4)
+    config = dict(vars(args))
+    config['run'] = {
+        'git': git_info(),
+        'seed': seed,
+        'net_spec_resolved': spec,
+        'num_classes': train_ds.num_classes,
+        'num_params': total_p,
+        'train_lines': len(train_ds),
+        'eval_lines': len(eval_loader.dataset) if eval_loader else 0,
+        'padding': 'legacy' if legacy_pad else 'white',
+        'torch': torch.__version__,
+        'cuda': torch.version.cuda if device.type == 'cuda' else None,
+        'device': torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu',
+        'python': sys.version.split()[0],
+        'started': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    }
     with open(os.path.join(p.output_dir, 'config.json'), 'w') as f:
-        json.dump(vars(args), f, indent=2)
+        json.dump(config, f, indent=2, ensure_ascii=False, default=str)
 
     print(f"{'=' * 70}")
     print("  Training started...")
@@ -313,7 +351,7 @@ def cmd_training(args):
                            eval_wer=round(eval_wer, 6) if eval_wer is not None else '',
                            eval_acc=round(eval_acc, 6) if eval_acc is not None else '',
                            mean_rms=round(mean_rms, 6),
-                           learning_rate=args.learning_rate,
+                           learning_rate=optimizer.param_groups[0]['lr'],
                            gpu_mem_gb=round(gpu_mem, 3), samples_per_sec=round(sps, 1),
                            coer_source=coer_source,
                            train_cer_strict=round(train_extra['cer_strict'], 6),
@@ -345,16 +383,24 @@ def cmd_training(args):
                     # Group: Model
                     tb_writer.add_scalar('Model/Mean_RMS',         mean_rms,           iteration)
                     # Group: System
-                    tb_writer.add_scalar('System/Learning_Rate',   args.learning_rate, iteration)
+                    tb_writer.add_scalar('System/Learning_Rate',   optimizer.param_groups[0]['lr'], iteration)
                     tb_writer.add_scalar('System/GPU_Memory_GB',   gpu_mem,            iteration)
                     tb_writer.add_scalar('System/Samples_per_Sec', sps,                iteration)
                     tb_writer.flush()
 
                 run_loss, run_n = 0.0, 0
 
+                if scheduler is not None and iteration % (args.debug_interval * 5) == 0:
+                    before = optimizer.param_groups[0]['lr']
+                    scheduler.step(eval_cer if eval_cer is not None else train_cer)
+                    after = optimizer.param_groups[0]['lr']
+                    if after < before:
+                        print(f"  ↓ LR reduced {before:.2e} → {after:.2e} (no CER improvement for "
+                              f"{args.lr_patience} evaluations)")
+
                 if is_best:
                     best_cer = score
-                    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_best.pt')
+                    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_best.pt', scheduler)
 
                 cer_check = eval_cer if eval_cer is not None else train_cer
                 if cer_check <= args.target_error_rate:
@@ -363,11 +409,11 @@ def cmd_training(args):
 
             if iteration % args.save_interval == 0:
                 _save(model, optimizer, iteration, train_ds, args,
-                      p.model_output + f'_checkpoint_{iteration}.pt')
+                      p.model_output + f'_checkpoint_{iteration}.pt', scheduler)
 
         if best_cer <= args.target_error_rate: break
 
-    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_final.pt')
+    _save(model, optimizer, iteration, train_ds, args, p.model_output + '_final.pt', scheduler)
     elapsed = time.time() - t0
     print(f"\n{'=' * 70}")
     best = (f"Best CER: {best_cer:.6f}" if best_cer != float('inf') else
