@@ -68,3 +68,26 @@ def fold_sara_am(text):
         out.append(text[i])
         i += 1
     return ''.join(out)
+
+
+# ── Clusters for CluER (cluster error rate) ────────────────────────────────────────────────
+# A cluster is one spacing character (normally a consonant) plus the marks written above or
+# below it: tone, upper vowel, lower vowel and subscript ລ (tiers 1, 2, 4, 5). Spacing vowels
+# (ເ ແ ໂ ໃ ໄ, ະ າ ຳ), digits, spaces and symbols are clusters of their own.
+CLUSTER_MARK_CLASSES = ('tone', 'upper_vowel', 'lower_vowel', 'special')
+
+
+def _is_mark(ch):
+    import unicodedata
+    return get_component_type(ch) in CLUSTER_MARK_CLASSES or unicodedata.category(ch).startswith('M')
+
+
+def split_clusters(text):
+    """'ກິ່ນເຂົ້າ' → ['ກິ່', 'ນ', 'ເ', 'ຂົ້', 'າ']. No normalisation; a mark with no base is its own unit."""
+    out = []
+    for ch in text:
+        if out and _is_mark(ch) and not (len(out[-1]) == 1 and _is_mark(out[-1])):
+            out[-1] += ch
+        else:
+            out.append(ch)
+    return out

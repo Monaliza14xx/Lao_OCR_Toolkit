@@ -32,3 +32,11 @@ def test_render_progress_contains_the_essentials():
     for piece in ('iter 500/10,000', 'ETA', '★ best so far', 'CoER', 'tone 12.0%',
                   '✓ exact', '(empty)'):
         assert piece in text, piece
+
+
+def test_render_progress_shows_strict_cer_and_cluer_when_given():
+    text = render_progress(
+        iteration=500, max_iter=1000, epoch=1, sps=100, elapsed=10, iters_done=500,
+        loss=1.0, avg_loss=1.0, train={'cer': 0.1, 'wer': 0.2, 'acc': 0.3},
+        evaluation={'loss': 1.0, 'cer': 0.1, 'wer': 0.2, 'acc': 0.3, 'cer_strict': 0.125, 'cluer': 0.2})
+    assert 'strict CER 12.50%' in text and 'CluER 20.00%' in text

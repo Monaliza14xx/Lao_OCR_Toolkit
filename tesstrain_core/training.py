@@ -251,14 +251,17 @@ def cmd_training(args):
                 avg_loss = run_loss / run_n
                 sps = (iteration - start_iter) * args.batch_size / elapsed
 
+                train_extra, eval_extra = {}, {}
                 train_cer, train_wer, train_acc, train_coer, train_samples = compute_metrics(
                     model, [(imgs.cpu(), labels.cpu(), ilens, tlens)],
-                    train_ds, device, max_batches=1, collect_samples=3, use_real_lengths=not legacy_pad)
+                    train_ds, device, max_batches=1, collect_samples=3, use_real_lengths=not legacy_pad,
+                    details=train_extra)
 
                 eval_cer, eval_wer, eval_acc, eval_loss_val, eval_coer = None, None, None, None, None
                 if eval_loader and iteration % (args.debug_interval * 5) == 0:
                     eval_cer, eval_wer, eval_acc, eval_coer, _ = compute_metrics(
-                        model, eval_loader, train_ds, device, use_real_lengths=not legacy_pad)
+                        model, eval_loader, train_ds, device, use_real_lengths=not legacy_pad,
+                        details=eval_extra)
                     # Compute eval loss
                     model.eval()
                     eval_losses = []
@@ -294,7 +297,8 @@ def cmd_training(args):
                     loss=loss.item(), avg_loss=avg_loss,
                     train={'cer': train_cer, 'wer': train_wer, 'acc': train_acc},
                     evaluation=None if eval_cer is None else
-                        {'loss': eval_loss_val, 'cer': eval_cer, 'wer': eval_wer, 'acc': eval_acc},
+                        {'loss': eval_loss_val, 'cer': eval_cer, 'wer': eval_wer, 'acc': eval_acc,
+                         'cer_strict': eval_extra.get('cer_strict'), 'cluer': eval_extra.get('cluer')},
                     coer=coer, coer_source=coer_source, is_best=is_best,
                     mean_rms=mean_rms, lr=optimizer.param_groups[0]['lr'],
                     gpu_mem=gpu_mem, gpu_peak=gpu_peak, samples=train_samples))
@@ -312,6 +316,10 @@ def cmd_training(args):
                            learning_rate=args.learning_rate,
                            gpu_mem_gb=round(gpu_mem, 3), samples_per_sec=round(sps, 1),
                            coer_source=coer_source,
+                           train_cer_strict=round(train_extra['cer_strict'], 6),
+                           train_cluer=round(train_extra['cluer'], 6),
+                           eval_cer_strict=round(eval_extra['cer_strict'], 6) if eval_extra else '',
+                           eval_cluer=round(eval_extra['cluer'], 6) if eval_extra else '',
                            **{f'coer_{k}': round(coer[k], 6) for k in COER_KEYS if coer and k in coer})
 
                 # --- TensorBoard scalars ---
@@ -327,6 +335,8 @@ def cmd_training(args):
                     if eval_cer is not None:
                         tb_writer.add_scalar('Eval/CER',      eval_cer,  iteration)
                         tb_writer.add_scalar('Eval/WER',      eval_wer,  iteration)
+                        tb_writer.add_scalar('Eval/CER_strict', eval_extra['cer_strict'], iteration)
+                        tb_writer.add_scalar('Eval/CluER',    eval_extra['cluer'], iteration)
                     if eval_acc is not None:
                         tb_writer.add_scalar('Eval/Accuracy', eval_acc,  iteration)
                     # Group: CoER (per Lao character class, eval set only)

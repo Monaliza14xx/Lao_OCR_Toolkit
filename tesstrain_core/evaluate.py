@@ -7,7 +7,8 @@ from torch.utils.data import DataLoader
 from .utils import resolve_paths
 from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
 from .model import build_model
-from .metrics import compute_metrics, edit_distance, align_strings, compute_component_metrics, LAO_COMPONENT_MAP
+from .metrics import (compute_metrics, edit_distance, align_strings, compute_component_metrics, LAO_COMPONENT_MAP,
+                      strict_cer_counts, cluster_error_counts)
 import csv
 
 
@@ -96,12 +97,15 @@ def cmd_evaluation(args):
                               num_workers=args.num_workers, collate_fn=legacy_collate_fn if legacy_pad else collate_fn)
 
     c_samples = -1 if getattr(args, 'csv', '') else 5
+    extra = {}
     cer, wer, acc, coer, samples = compute_metrics(model, eval_loader, eval_ds, device, max_batches=9999, collect_samples=c_samples,
-                                                 use_real_lengths=not legacy_pad)
+                                                 use_real_lengths=not legacy_pad, details=extra)
     print(f"\n{'=' * 50}")
     print(f"  Model:      {pt_path}")
     print(f"  Eval files: {len(eval_files)}")
-    print(f"  CER:        {cer:.6f} ({cer*100:.2f}%)")
+    print(f"  CER:        {cer:.6f} ({cer*100:.2f}%)   lenient (normalised, similar pairs = 0.5)")
+    print(f"  CER strict: {extra['cer_strict']:.6f} ({extra['cer_strict']*100:.2f}%)   plain Levenshtein")
+    print(f"  CluER:      {extra['cluer']:.6f} ({extra['cluer']*100:.2f}%)   consonant + marks = 1 unit")
     print(f"  WER:        {wer:.6f} ({wer*100:.2f}%)")
     print(f"  Accuracy:   {acc:.6f} ({acc*100:.2f}%)")
     
@@ -128,6 +132,7 @@ def cmd_evaluation(args):
         headers = ['case', 'truth', 'pred', 'cer', 'wer']
         for cat in sorted_cats:
             headers.extend([f'{cat}_errors', f'{cat}_total', f'{cat}_rate'])
+        headers.extend(['cer_strict', 'cluer'])
             
         with open(args.csv, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -145,6 +150,9 @@ def cmd_evaluation(args):
                     s = c_stats.get(cat, {'errors': 0, 'total': 0})
                     rate = s['errors'] / max(s['total'], 1) if s['total'] > 0 else 0
                     row.extend([s['errors'], s['total'], f"{rate:.4f}"])
+                se, sn = strict_cer_counts(pred_s, gt_s)
+                ce, cn = cluster_error_counts(pred_s, gt_s)
+                row.extend([f"{se / max(sn, 1):.4f}", f"{ce / max(cn, 1):.4f}"])
                 writer.writerow(row)
         print(f"  ✓ Export complete: {args.csv}")
 
