@@ -339,6 +339,139 @@ class MonotonicConformerBlock(nn.Module):
 
 
 
+# ── LCNetV4-style CNN stage: Lcn4[s],<C>,<depth>[,<sy>,<sx>] ─────────────────────────────────
+
+def _fuse_conv_bn(kernel, bn):
+    """(kernel, bn) → (kernel', bias') of the single conv that equals conv followed by eval-mode BN."""
+    std = (bn.running_var + bn.eps).sqrt()
+    t = (bn.weight / std).reshape(-1, 1, 1, 1)
+    return kernel * t, bn.bias - bn.running_mean * bn.weight / std
+
+
+class RepDWConv(nn.Module):
+    """Token mixer: 3×3 depthwise conv with training-time reparameterisation (RepVGG-DW style).
+
+    Training: BN(DW3×3(x)) + BN(DW1×1(x)) + BN(x). reparameterize() fuses the three branches
+    into one 3×3 depthwise conv with bias, which gives the same output in eval mode.
+    """
+
+    def __init__(self, c):
+        super().__init__()
+        self.conv3 = nn.Conv2d(c, c, 3, 1, 1, groups=c, bias=False)
+        self.bn3 = nn.BatchNorm2d(c)
+        self.conv1 = nn.Conv2d(c, c, 1, 1, 0, groups=c, bias=False)
+        self.bn1 = nn.BatchNorm2d(c)
+        self.bn_id = nn.BatchNorm2d(c)
+        self.fused = None
+
+    def forward(self, x):
+        if self.fused is not None:
+            return self.fused(x)
+        return self.bn3(self.conv3(x)) + self.bn1(self.conv1(x)) + self.bn_id(x)
+
+    @torch.no_grad()
+    def reparameterize(self):
+        if self.fused is not None:
+            return
+        c = self.conv3.in_channels
+        k3, b3 = _fuse_conv_bn(self.conv3.weight, self.bn3)
+        k1, b1 = _fuse_conv_bn(nn.functional.pad(self.conv1.weight, (1, 1, 1, 1)), self.bn1)
+        ident = torch.zeros_like(self.conv3.weight)
+        ident[:, 0, 1, 1] = 1.0
+        ki, bi = _fuse_conv_bn(ident, self.bn_id)
+        self.fused = nn.Conv2d(c, c, 3, 1, 1, groups=c, bias=True).to(self.conv3.weight.device)
+        self.fused.weight.copy_(k3 + k1 + ki)
+        self.fused.bias.copy_(b3 + b1 + bi)
+        for name in ('conv3', 'bn3', 'conv1', 'bn1', 'bn_id'):
+            delattr(self, name)
+
+
+class SqueezeExcite(nn.Module):
+    """SE over the line. With widths, the mean only covers each line's real columns."""
+
+    def __init__(self, c, reduction=4):
+        super().__init__()
+        mid = max(8, c // reduction)
+        self.fc1 = nn.Conv2d(c, mid, 1)
+        self.fc2 = nn.Conv2d(mid, c, 1)
+
+    def forward(self, x, widths=None):
+        if widths is None:
+            s = x.mean((2, 3), keepdim=True)
+        else:
+            keep = (torch.arange(x.size(3), device=x.device).unsqueeze(0)
+                    < widths.to(x.device).unsqueeze(1)).to(x.dtype)[:, None, None, :]
+            s = (x * keep).sum((2, 3), keepdim=True) / (keep.sum((2, 3), keepdim=True) * x.size(2))
+        return x * nn.functional.hardsigmoid(self.fc2(nn.functional.relu(self.fc1(s))))
+
+
+class Lcn4Block(nn.Module):
+    """RepDW 3×3 token mixer (+ optional SE), then a residual 1×1 channel mixer:
+    x + BN0(PW(GELU(BN(PW_expand×2(x))))) with the last BN zero-initialised, so a new block
+    starts as (almost) the identity."""
+
+    def __init__(self, c, se=False):
+        super().__init__()
+        self.token = RepDWConv(c)
+        self.se = SqueezeExcite(c) if se else None
+        self.channel = nn.Sequential(
+            nn.Conv2d(c, 2 * c, 1, bias=False), nn.BatchNorm2d(2 * c), nn.GELU(),
+            nn.Conv2d(2 * c, c, 1, bias=False), nn.BatchNorm2d(c))
+        nn.init.zeros_(self.channel[-1].weight)
+
+    def forward(self, x, widths=None):
+        if widths is not None:                 # 3×3 conv sees zeros past the line end
+            x = _mask_width(x, widths, 0.0)
+        x = self.token(x)
+        if self.se is not None:
+            x = self.se(x, widths)
+        return x + self.channel(x)
+
+
+class Lcn4Stage(nn.Module):
+    """Lcn4[s],<C>,<depth>[,<sy>,<sx>]: one LCNetV4-style CNN stage.
+
+    If the channel count changes or a stride is given, a 3×3 conv (stride sy, sx) + BN + GELU
+    goes first; then <depth> Lcn4Block. 's' turns on SE. The output stays 4-D (B, C, H, W):
+    nothing pools the height, so any collapse token (Lfys, Atys, Matys, Hybys) or flatten
+    can follow. (2,1) strides halve the height and keep every column (frame) for CTC.
+    """
+    uses_lengths = True
+
+    def __init__(self, in_c, c, depth, stride=(1, 1), se=False):
+        super().__init__()
+        self.stride = tuple(stride)
+        self.down = None
+        if in_c != c or self.stride != (1, 1):
+            self.down = nn.Sequential(nn.Conv2d(in_c, c, 3, self.stride, 1, bias=False),
+                                      nn.BatchNorm2d(c), nn.GELU())
+        self.blocks = nn.ModuleList(Lcn4Block(c, se) for _ in range(depth))
+
+    def out_width(self, w):
+        return _conv_like_width(w, 3, self.stride, 1) if self.down is not None else w
+
+    def forward(self, x, lengths=None):
+        w = lengths
+        if self.down is not None:
+            if w is not None:
+                x = _mask_width(x, w, 0.0)
+            x = self.down(x)
+            if w is not None:
+                w = self.out_width(w).clamp(1, x.size(3))
+        for blk in self.blocks:
+            x = blk(x, w)
+        return x
+
+
+def reparameterize_model(model):
+    """Fuse every reparameterisable branch (Lcn4 token mixers) for inference. Call after
+    model.eval(); the fused model gives the same outputs in eval mode. Returns the model."""
+    for m in list(model.modules()):
+        if hasattr(m, 'reparameterize') and m is not model:
+            m.reparameterize()
+    return model
+
+
 class Permute1DForBN(nn.Module):
     """Wrap BatchNorm1d so it works on (B, T, C) sequence tensors.
     BatchNorm1d expects (B, C, T), so we permute before and after."""
@@ -410,6 +543,10 @@ class VGSLNet(nn.Sequential):
     padded frames. State-dict keys are the same as a plain nn.Sequential.
     """
 
+    def reparameterize(self):
+        """Fuse Lcn4 training branches for inference (see reparameterize_model)."""
+        return reparameterize_model(self)
+
     def forward(self, x, widths=None):
         if widths is None:
             return super().forward(x)
@@ -463,6 +600,17 @@ def build_model(spec, num_classes):
             py, px = int(m.group(1)), int(m.group(2))
             layers.append(nn.MaxPool2d((py, px), stride=(py, px)))
             cur_h //= py
+            continue
+        # ── LCNetV4-style stage: Lcn4[s],<C>,<depth>[,<sy>,<sx>] ──
+        m = re.match(r'^Lcn4(s?),(\d+),(\d+)(?:,(\d+),(\d+))?$', tok)
+        if m:
+            c, depth = int(m.group(2)), int(m.group(3))
+            stride = (int(m.group(4)), int(m.group(5))) if m.group(4) else (1, 1)
+            stage = Lcn4Stage(in_c, c, depth, stride, se=m.group(1) == 's')
+            layers.append(stage)
+            if stage.down is not None:
+                cur_h = (cur_h + 2 - 3) // stride[0] + 1
+            in_c = c
             continue
         # ── Asymmetric MaxPool: Mpa<ky>,<kx>,<sy>,<sx>,<py>,<px> ──
         m = re.match(r'^Mpa(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)$', tok)

@@ -9,11 +9,12 @@ from tesstrain_core.model import build_model, output_lengths
 
 H = 32
 # Each has a layer that reads the padding if nothing stops it: right-to-left LSTM (B0 layout),
-# true BiLSTM + attention + conformer, and an x-stride-1 pool with attention collapse.
+# true BiLSTM + attention + conformer, an x-stride-1 pool with attention collapse, Lcn4 + SE.
 SPECS = [
     '[1,32,0,1 Ct3,3,8 Mp3,3 Lfys16 Lfx32 Lrx32 Lfx48 O1c20]',
     '[1,32,0,1 Ct3,3,8 Mp3,3 Lfys16 Lbx32 SelfAttnX4 ConfX4 O1c20]',
     '[1,32,0,1 Ct5,5,8 Mpa3,3,3,1,0,1 Atys16 Lbpx16,16 Lrx16 O1c20]',
+    '[1,32,0,1 Lcn4s,8,1 Mp3,3 Lcn4s,16,1,2,1 Lfys16 Lrx32 O1c20]',     # Lcn4 with SE (mean over the line)
 ]
 
 
