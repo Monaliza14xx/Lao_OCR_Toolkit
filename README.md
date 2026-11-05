@@ -62,6 +62,7 @@ It reads the same ground-truth format as [tesstrain](https://github.com/tesserac
 - [🐛 Troubleshooting](#-troubleshooting)
 - [📄 Command Reference](#-command-reference)
 - [🛠️ Utilities](#️-utilities)
+- [🧪 Step 0 experiments](#-step-0-experiments)
 - [⚠️ Known Limitations](#️-known-limitations)
 - [🧪 Development](#-development)
 
@@ -537,9 +538,23 @@ python3 torch_train.py training --model_name lao \
 | `--debug_interval` | `100` | Print metrics every N iterations |
 | `--start_model` | — | Path to checkpoint for fine-tuning |
 | `--start_tess_model` | — | Path to Tesseract `.traineddata` or `.lstm` for transfer-learning warm-start |
+| `--seed` | none | Seed torch / numpy / random, the batch shuffle and deterministic cuDNN for repeatable runs. Not set = unseeded, as before (`--random_seed` only seeds the automatic train/eval split) |
+| `--lr_scheduler` | `none` | `none` = constant LR; `plateau` = `ReduceLROnPlateau` on eval CER, stepped at every evaluation |
+| `--lr_factor` | `0.5` | `plateau`: multiply the LR by this when eval CER stops improving |
+| `--lr_patience` | `5` | `plateau`: evaluations without improvement before reducing. One evaluation runs every 5 × `--debug_interval` iterations, so 5 = 2,500 iterations at the default interval |
+| `--min_lr` | `1e-5` | `plateau`: lower bound for the LR |
+| `--padding` | `white` | `white` = pad batches with the paper colour and use every line's real length (CTC, decoding, right-to-left layers). `legacy` = black padding over the full width, as before the fix; use it only to reproduce old runs (also accepted by `evaluation`) |
 | `--data_dir` | `data` | Root data directory |
 | `--tensorboard` | `True` | Log live metrics to TensorBoard |
 | `--tensorboard_dir` | `data/.../tensorboard` | Custom TensorBoard log directory |
+
+Each run writes `config.json` to its output folder: every argument plus a `run` block with the git
+commit (and whether the tree had uncommitted changes), the seed, the resolved `net_spec`, class and
+parameter counts, train/eval line counts, padding mode and the torch / CUDA / device / Python versions.
+Checkpoints also store the seed (and the scheduler state when `--lr_scheduler plateau` is used).
+
+`training.log` and the console report show **strict CER** (plain Levenshtein) and **CluER** (cluster
+error rate) next to the lenient CER; see [Step 0 experiments](#-step-0-experiments).
 
 #### Live Tracking & Visualizations
 
@@ -600,7 +615,17 @@ python3 torch_train.py evaluation --model_name lao --batch_size 32
 
 > **Note:** The architecture is automatically read from the checkpoint, so evaluation always works even if the checkpoint was trained with a custom `--net_spec`.
 >
-> **Tip:** Use `--batch_size 1` when you need results that don't depend on batch composition (see [Known Limitations](#️-known-limitations)). Evaluation always uses greedy decoding.
+> Results don't depend on the batch size: each line is padded with white and decoded over its own
+> frames only. `--padding legacy` scores a model the old way (black padding, full width).
+> Evaluation always uses greedy decoding. It prints three error rates:
+>
+> | Metric | What it counts |
+> |---|---|
+> | CER | lenient: normalised strings, visually similar pairs (ດ/ຕ, ນ/ມ …) cost 0.5 |
+> | CER strict | plain Levenshtein on the raw strings |
+> | CluER | Levenshtein over clusters: a consonant plus its tone / upper vowel / lower vowel / subscript ລ marks is one unit |
+>
+> `--csv` adds per-line `cer_strict` and `cluer` columns.
 
 ### Recognition (Inference)
 
@@ -986,6 +1011,7 @@ Layer breakdown:
 | `D<rate>` | Dropout (rate is integer 0–99, only active during training) | Any | `D20` (= 20%) |
 | `Fc<N>` | Dense / fully-connected: Linear(N) + ReLU | Seq | `Fc256` |
 | `O<d>c<N>` | Output: Linear layer, N = class count (`###` = auto) | Seq | `O1c###` |
+| `Lcn4[s],C,D[,SY,SX]` | LCNetV4-style stage: (3×3 conv to C channels with stride SY,SX if C or the stride changes), then D blocks of re-parameterisable 3×3 depthwise conv (+ SE with `s`) and a residual 1×1 ×2 channel mixer. Output stays 4-D, so any collapse token can follow | CNN | `Lcn4,48,2`, `Lcn4s,64,1,2,1` |
 
 > **Note:** If a sequence layer follows a 2-D CNN layer without a height-collapse token, the
 > feature map is flattened (channels × height) per column automatically.
@@ -1005,11 +1031,23 @@ Layer breakdown:
 
 # With Dense layer (bottleneck between LSTMs)
 --net_spec "[1,48,0,1 Ct3,3,16 Bn Mp3,3 Lfys64 Lfx96 Fc256 D40 Lrx96 Lfx512 O1c###]"
+
+# LCNetV4-style CNN backbone (~1.02M params at 80 classes, 11 rows reach Lfys, T = W/3)
+--net_spec "[1,64,0,1 Lcn4,24,1 Mp3,3 Lcn4,48,2 Lcn4,64,1,2,1 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]"
+```
+
+`Lcn4` trains with three branches per depthwise conv (3×3, 1×1 and a BN identity). For inference,
+fuse them into one 3×3 conv; the outputs are the same in eval mode:
+
+```python
+from tesstrain_core.model import build_model, reparameterize_model
+model = build_model(spec, num_classes); model.load_state_dict(ckpt['model_state_dict'])
+reparameterize_model(model.eval())        # or model.reparameterize()
 ```
 
 > **⚠️ Tesseract compatibility:** Only the standard Tesseract tokens (`C`, `Mp`, `L…`, `O`) can
 > receive weights via `--start_tess_model`. Everything else (`Bn`, `D`, `Fc`, `Cp`, `Mpa`, attention and
-> Conformer layers, `Lbpx`) is a PyTorch-only extension. Models are exported to ONNX only; there is no
+> Conformer layers, `Lbpx`, `Lcn4`) is a PyTorch-only extension. Models are exported to ONNX only; there is no
 > export back to a Tesseract `.traineddata` file.
 
 ---
@@ -1274,14 +1312,56 @@ pip install pytesseract pillow matplotlib numpy
 
 ---
 
+## 🧪 Step 0 experiments
+
+Step 0 of the PhD plan ([`experiments/EXPERIMENT_PLAN.md`](experiments/EXPERIMENT_PLAN.md)) swaps
+one module of the thesis model B0 = `I64K5C16` at a time: the height collapse ("squash"), the
+sequence model, the CNN, and the CTC time resolution (x-stride). The toolkit pieces it needs:
+
+| Plan item | What | Where |
+|---|---|---|
+| P0.1 | White padding + real per-line lengths; batch size 1 and 64 give the same predictions | `--padding` (default `white`), `tests/test_padding.py` |
+| P0.2 | Strict CER and CluER next to the lenient CER | `evaluation`, `training.log`, `tesstrain_core/metrics.py` |
+| P0.4 | `--seed`; git commit, seed, resolved spec and all args in `config.json`; optional `ReduceLROnPlateau` | `--seed`, `--lr_scheduler plateau` |
+| — | Modern CNN backbone token | `Lcn4` (see [VGSL](#network-architecture-vgsl)) |
+
+List the configurations, with parameter counts (80 classes), rows reaching the collapse and CTC
+frames for a 512 px line:
+
+```bash
+python3 experiments/step0_specs.py
+```
+
+| Name | Change vs B0 | Params |
+|---|---|---|
+| `B0` | `[1,64,0,1 Ct5,5,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]` | 929,264 |
+| `S-flatten` / `S-Atys64` / `S-Matys64` / `S-Hybys64` | collapse: none / additive attention / 4-head attention / BiLSTM + attention | 1,012,720 / 911,600 / 914,672 / 933,744 |
+| `R-none` / `R-fwd` / `R-BiLSTM` | sequence model: none / `Lfx384` / `Lbx96 Lbx384` | 26,608 / 743,408 / 1,982,960 |
+| `C-K3` / `C-2conv` / `C-Lcn4` | CNN: `Ct3,3,16` / `+ Ct5,5,32` after the pool / `Lcn4` backbone | 929,008 / 946,192 / 1,020,808 |
+| `X-sx1` / `X-sx2` | pool x-stride 1 (T = W) / 2 (T ≈ W/2) with `Mpa` | 929,264 / 929,264 |
+
+Print the training commands (seeds 1, 2, 3 by default) and add your data paths:
+
+```bash
+python3 experiments/step0_specs.py --commands --extra "--ground_truth_dir data/lao-ground-truth"
+python3 experiments/step0_specs.py --commands --only B0 squash --seeds 1 2 3 4 5
+```
+
+The shared recipe is `--batch_size 64 --learning_rate 0.002 --max_iterations 50000 --lr_scheduler plateau`
+(change it with `--train_args`). The thesis' scheduler settings are not known yet (plan §1b, item 2),
+so `--lr_factor` / `--lr_patience` / `--min_lr` keep the defaults above until they are recovered.
+For the faithful thesis replication (E1a), add `--padding legacy`.
+
+---
+
 ## ⚠️ Known Limitations
 
 These are known issues in the current code. Keep them in mind when you read or report results.
 
-1. **Batch padding is black.** Images are scaled so white paper = +1 and black ink = −1, and `collate_fn` pads narrower lines with −1 (black). The CTC input length also covers the padding. Models with right-to-left (`Lrx`, `Lbx`) or attention layers therefore see the padding before the text, so a line's prediction can change with the other lines in its batch. In a test with an under-trained model, 296 of 400 predictions changed between batch size 1 and 64 with black padding, versus 2 of 400 with white padding. Use `--batch_size 1` for batch-independent evaluation. The planned fix is to pad with white (+1) and pass each line's real length to CTC.
-2. **CER/WER are lenient by default.** `tesstrain_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
+1. **Batch padding (fixed; `--padding legacy` brings the old behaviour back).** Runs before this fix padded with −1 (black) and gave CTC the full padded width, so models with right-to-left (`Lrx`, `Lbx`) or attention layers saw the padding before the text: in one test 296 of 400 predictions changed between batch size 1 and 64. Now batches are padded with white (+1), and the model receives every line's width: convolutions see the same zeros past the line end as at batch size 1, `Lrx` / `Lbx` start at the line's own end, attention and SE ignore padded columns, and CTC / decoding use the real frame count. In training mode, BatchNorm statistics still include the padding. Numbers from older runs are not directly comparable.
+2. **CER/WER are lenient by default.** Strict CER and CluER are now reported next to it (see [Evaluation](#evaluation)). `tesstrain_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
 3. **Beam search merges double letters.** The beam decoder (`recognize --beam_width > 1`) doesn't track whether a blank separated two identical characters, so `100` can come out as `10`. Greedy decoding is not affected; `evaluation` and `compare` always decode greedily.
-4. **No learning-rate schedule.** The learning rate stays constant for the whole run.
+4. **No learning-rate schedule by default.** The learning rate stays constant unless you pass `--lr_scheduler plateau`.
 5. **Early stopping can use training CER.** On logging steps where validation doesn't run, `--target_error_rate` is checked against the current training batch's CER.
 
 ---
@@ -1296,12 +1376,14 @@ These are known issues in the current code. Keep them in mind when you read or r
 
 ```bash
 pip install -r requirements-dev.txt
-pytest            # unit + end-to-end tests (about 10 s on CPU)
+pytest            # unit + end-to-end tests (about 30 s on CPU)
 ruff check .      # lint
 ```
 
-The tests cover the Lao character classes, CER/WER/CoER, the training report, text
-normalization, the VGSL model builder, the command-line entry points, and the document
+The tests cover the Lao character classes, CER/WER/CoER, strict CER and CluER, the training
+report, text normalization, the VGSL model builder (including `Lcn4` and its fused form),
+batch-size independence of predictions, a short end-to-end training run (seed, `config.json`,
+LR scheduler), the Step 0 spec list, the command-line entry points, and the document
 pipeline end to end (synthetic letter → layout analysis → labelled line crops). The
 document test needs Pillow built with libraqm and is skipped otherwise. GitHub Actions
 runs lint and tests on every push and pull request.

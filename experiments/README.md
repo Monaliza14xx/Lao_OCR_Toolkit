@@ -24,3 +24,4 @@ python3 experiments/compare_cross.py --help
 | `plot_training.py` | Plots from Tesseract LSTM training logs |
 | `plot_confusion_matrix.py` | Per-class character confusion matrices from prediction CSVs |
 | `generate_projection_profile.py` | Projection-profile figure of a rendered Lao word |
+| `step0_specs.py` | Step 0 part-swap net_specs ([`EXPERIMENT_PLAN.md`](EXPERIMENT_PLAN.md)): table of params / rows / frames, and `torch_train.py` commands per seed |
