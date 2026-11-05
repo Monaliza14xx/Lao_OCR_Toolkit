@@ -9,7 +9,7 @@ This toolkit covers the whole path to a Lao text-line recognizer:
 - **Evaluation**: CER, WER and Lao-specific error analysis (tone marks, vowels, consonants), plus comparisons against Tesseract models.
 - **Deployment**: export to ONNX.
 
-It reads the same ground-truth format as [tesstrain](https://github.com/tesseract-ocr/tesstrain) (`.gt.txt`, `.lstmf`, `unicharset`), so existing Tesseract training data works unchanged. Trained models are exported to ONNX, not to Tesseract `.traineddata`.
+It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract-ocr/tesstrain), so existing tesstrain `.lstmf` data can be used as is (image + `.gt.txt` pairs are converted first). The character set is built from the training data (`charset.json`), not read from a `unicharset`. Trained models are exported to ONNX, not to Tesseract `.traineddata`, and Tesseract model weights cannot be loaded (see [Known Limitations](#️-known-limitations)).
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
@@ -21,13 +21,13 @@ It reads the same ground-truth format as [tesstrain](https://github.com/tesserac
 
 | Feature | Description |
 |---------|-------------|
-| **GPU Training** | 10–50× faster than Tesseract's `lstmtraining` |
+| **GPU Training** | PyTorch training on CUDA (falls back to CPU) |
 | **PyTorch LSTM** | Standard PyTorch nn.LSTM with CTC loss |
-| **Optimizers** | Adam and SGD + Momentum supported |
-| **VGSL Architectures** | Tesseract VGSL strings plus PyTorch-only layers: BatchNorm, Dropout, Dense, attention height-collapse (`Atys`, `Matys`, `Hybys`), self-attention and Conformer blocks |
-| **Tesseract Transfer** | Warm-start from a Tesseract `.traineddata` / `.lstm` model |
-| **Beam Search + DAWG** | Dictionary-constrained decoding with word/number/punctuation DAWGs |
-| **Language Model** | N-gram LM (char trigrams + word bigrams) for beam search |
+| **Optimizers** | Adam and SGD + Momentum supported; optional ReduceLROnPlateau |
+| **VGSL Architectures** | Tesseract VGSL strings plus PyTorch-only layers: BatchNorm, Dropout, Dense, attention height-collapse (`Atys`, `Matys`, `Hybys`), self-attention and Conformer blocks, `Lcn4` CNN stage |
+| **Resume / fine-tune** | Continue from a PyTorch `.pt` checkpoint (`--start_model`) |
+| **Beam Search + dictionary** | Beam search with a word list (`--wordlist`, prefix trie), number patterns and punctuation rules |
+| **Language Model** | N-gram LM (char trigrams + word bigrams, add-k smoothing) for beam search |
 | **Page Segmentation** | PSM 3, 6, 7, 13 for full-page and single-line OCR |
 | **ONNX Export** | Cross-platform deployment with ONNX Runtime |
 | **Synthetic Data** | Generate training images with GPU-accelerated augmentations + calibrated presets |
@@ -543,7 +543,6 @@ python3 torch_train.py training --model_name lao \
 | `--target_error_rate` | `0.01` | Stop early when CER reaches this value |
 | `--debug_interval` | `100` | Print metrics every N iterations |
 | `--start_model` | — | Path to checkpoint for fine-tuning |
-| `--start_tess_model` | — | Path to Tesseract `.traineddata` or `.lstm` for transfer-learning warm-start |
 | `--seed` | none | Seed torch / numpy / random, the batch shuffle and deterministic cuDNN for repeatable runs. Not set = unseeded, as before (`--random_seed` only seeds the automatic train/eval split) |
 | `--lr_scheduler` | `none` | `none` = constant LR; `plateau` = `ReduceLROnPlateau` on eval CER, stepped at every evaluation |
 | `--lr_factor` | `0.5` | `plateau`: multiply the LR by this when eval CER stops improving |
@@ -796,7 +795,7 @@ Lao_OCR_Toolkit/
 │   ├── doc_layout.py           # Deskew, layout analysis, Lao-aware line segmentation
 │   ├── doc_synth.py            # Synthetic letter layout + scan simulation
 │   ├── dawg.py                 # Word/number/punctuation DAWGs + n-gram LM
-│   ├── tesseract_transfer.py   # Load Tesseract LSTM weights into PyTorch
+│   ├── tesseract_transfer.py   # Tesseract .lstm weight parser (broken on real models, see Known Limitations)
 │   ├── compare.py, inspection.py, projection.py, plotting.py   # Analysis & figures
 │   └── command_utils.py, utils.py
 ├── experiments/                # Research scripts: benchmarks, cross-comparisons, corpus
@@ -913,7 +912,7 @@ Real line images are converted to `.lstmf` with `gen_data_from_text.py --convert
 | Split | `lists` | `.lstmf` files → `list.train`, `list.val`, `list.test` |
 | Train | `training` | lists + VGSL `--net_spec` → `<model>_best.pt`, `<model>_final.pt`, `training.log`, TensorBoard logs |
 
-The model is built from the VGSL string (CNN layers → height collapse → LSTM layers → output layer) and trained with CTC loss; `--start_model` / `--start_tess_model` continue from a checkpoint or a Tesseract model.
+The model is built from the VGSL string (CNN layers → height collapse → LSTM layers → output layer) and trained with CTC loss; `--start_model` continues from a PyTorch checkpoint.
 
 ### ③ Evaluation
 
@@ -970,22 +969,6 @@ python3 torch_train.py training --model_name lao \
 ```
 
 > **Tip:** The network architecture (`--net_spec`) is **automatically loaded from the checkpoint** — you don't need to specify it again. The architecture from the checkpoint always takes precedence.
-
-### Transfer Learning: Tesseract CPU -> GPU
-
-You can warm-start PyTorch GPU training from an existing Tesseract CPU model (`.traineddata` or extracted `.lstm`).
-
-```bash
-python3 torch_train.py training --model_name lao \
-    --start_tess_model /path/to/lao.traineddata \
-    --net_spec "[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]" \
-    --epochs 50 --learning_rate 0.0005
-```
-
-Notes:
-- `--net_spec` should match the source Tesseract architecture.
-- The loader applies all compatible tensors and skips mismatched ones (commonly the final output layer when charset sizes differ).
-- This makes cross-domain adaptation practical: reuse backbone layers from CPU models, then continue fine-tuning on GPU data.
 
 ### Network Architecture (VGSL)
 
@@ -1056,32 +1039,18 @@ model = build_model(spec, num_classes); model.load_state_dict(ckpt['model_state_
 reparameterize_model(model.eval())        # or model.reparameterize()
 ```
 
-> **⚠️ Tesseract compatibility:** Only the standard Tesseract tokens (`C`, `Mp`, `L…`, `O`) can
-> receive weights via `--start_tess_model`. Everything else (`Bn`, `D`, `Fc`, `Cp`, `Mpa`, attention and
-> Conformer layers, `Lbpx`, `Lcn4`) is a PyTorch-only extension. Models are exported to ONNX only; there is no
-> export back to a Tesseract `.traineddata` file.
+> **⚠️ Tesseract compatibility:** The standard tokens (`C`, `Mp`, `L…`, `O`) use Tesseract's VGSL
+> syntax, but models are PyTorch only: weights cannot be imported from a Tesseract `.traineddata`, and
+> there is no export back to one (ONNX only). `Bn`, `D`, `Fc`, `Cp`, `Mpa`, the attention and Conformer
+> layers, `Lbpx` and `Lcn4` are PyTorch-only extensions.
 
 ---
 
 ## ⚡ Performance
 
-| Metric | Tesseract `lstmtraining` | This toolkit |
-|--------|--------------------------|---------------|
-| **Training speed** | ~20 samples/sec (CPU) | ~500 samples/sec (GPU) |
-| **10K iterations** | ~2 hours | ~5 minutes |
-| **Memory** | 2–4 GB RAM | 2–6 GB VRAM |
-| **Speedup** | 1× | **10–50×** |
-
-> Indicative figures; actual throughput depends on the GPU, batch size, line width and architecture.
-
-### GPU Memory Estimates (Tesla T4, 15GB)
-
-| Batch Size | ~Memory | ~Throughput |
-|------------|---------|-------------|
-| 32 | 2 GB | 200 samples/s |
-| 64 | 3 GB | 400 samples/s |
-| 128 | 5 GB | 600 samples/s |
-| 256 | 8 GB | 750 samples/s |
+The repository has no measured speed or memory benchmark, so none is quoted here. Every report the
+trainer prints shows the real throughput (`lines/s`) and GPU memory (current and peak) for your GPU,
+batch size and `net_spec`; `training.log` keeps `samples_per_sec` and `gpu_mem_gb` per report.
 
 ---
 
@@ -1090,11 +1059,11 @@ reparameterize_model(model.eval())        # or model.reparameterize()
 | Feature | Tesseract | This toolkit |
 |---------|-----------|---------------|
 | Training backend | C++ CPU | **PyTorch GPU** |
-| Optimizer | SGD + momentum | **Adam** / **SGD** |
-| Model export | `.traineddata` | `.onnx` (no `.traineddata` export) |
-| Beam search | ✅ | ✅ + DAWG + LM |
+| Optimizer | Adam or momentum SGD (`--net_mode`; tesstrain's default 192 uses Adam) | Adam / SGD + momentum |
+| Model export | `.traineddata` | `.onnx` (no `.traineddata` import or export) |
+| Beam search | ✅ + word / number / punctuation DAWGs | ✅ + word list + number / punctuation rules + LM |
 | Page segmentation | 14 modes | 4 modes (3, 6, 7, 13) |
-| Language model | Word n-gram | **Char + word n-gram** |
+| Language model | Dictionary DAWGs, no n-gram | Char + word n-gram (`--lm_corpus`) |
 | Synthetic data | `text2image` (C++) | `gen_data_from_text.py` |
 
 ---
@@ -1132,7 +1101,7 @@ pip install onnx>=1.14.0 onnxruntime>=1.15.0
 | `unicharset` | Build charset from `.gt.txt` | `--model_name` |
 | `lists` | Create train / val / test file lists | `--model_name`, `--ratio 80 10 10` |
 | `proto-model` | Build proto `.traineddata` | `--model_name` |
-| `training` | GPU training | `--optimizer`, `--epochs`, `--batch_size`, `--learning_rate`, `--start_model`, `--start_tess_model` |
+| `training` | GPU training | `--net_spec`, `--optimizer`, `--epochs`, `--batch_size`, `--learning_rate`, `--seed`, `--lr_scheduler`, `--start_model` |
 | `export` | Export PyTorch model to ONNX | `--model_name` |
 | `evaluation` | Eval CER / WER / Accuracy | `--model_name`, `--batch_size` |
 | `recognize` | Run OCR inference | `--image`, `--psm`, `--beam_width`, `--wordlist` |
@@ -1377,7 +1346,8 @@ These are known issues in the current code. Keep them in mind when you read or r
 2. **CER/WER are lenient by default.** Strict CER and CluER are now reported next to it (see [Evaluation](#evaluation)). `tesstrain_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
 3. **Beam search merges double letters.** The beam decoder (`recognize --beam_width > 1`) doesn't track whether a blank separated two identical characters, so `100` can come out as `10`. Greedy decoding is not affected; `evaluation` and `compare` always decode greedily.
 4. **No learning-rate schedule by default.** The learning rate stays constant unless you pass `--lr_scheduler plateau`.
-5. **Early stopping can use training CER.** On logging steps where validation doesn't run, `--target_error_rate` is checked against the current training batch's CER.
+5. **Tesseract weights can't be loaded.** `--start_tess_model` and `tesstrain_core/tesseract_transfer.py` exist, but the parser expects a different layer layout from the one Tesseract 4 writes (it doesn't read the `Series` that wraps each convolution), so it fails at the first layer of real models such as the stock `lao.traineddata`, and training exits with "Failed to parse Tesseract model". The `--tessdata_dir` option of `inspection`, `wer-distribution` and `confusion-matrix` uses the same parser. There are no tests for it. Start from scratch or from a PyTorch checkpoint (`--start_model`).
+6. **Early stopping can use training CER.** On logging steps where validation doesn't run, `--target_error_rate` is checked against the current training batch's CER.
 
 ---
 
