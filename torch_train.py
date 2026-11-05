@@ -162,6 +162,9 @@ Get help for a subcommand:
                    help='Momentum - only used with SGD              (default: 0.9)')
     g.add_argument('--weight_decay', type=float, default=0.0, metavar='WD',
                    help='L2 weight decay penalty                    (default: 0.0)')
+    g.add_argument('--padding', default='white', choices=['white', 'legacy'],
+                   help='Batch padding: white = pad with paper colour and use each line\'s real length for '
+                        'CTC/decoding; legacy = black padding over the full width, as before the fix (default: white)')
     g.add_argument('--force_GPU', action='store_true',
                    help='Require GPU for training; fail if not available')
     g = p.add_argument_group('stopping criteria')
@@ -194,6 +197,8 @@ Get help for a subcommand:
                    help='CTC decode beam width  (0=greedy, 5-10=beam search, default: 0)')
     p.add_argument('--csv', default='', metavar='FILE',
                    help='Export detailed evaluation metrics to CSV file')
+    p.add_argument('--padding', default='white', choices=['white', 'legacy'],
+                   help='Batch padding (see training -h). Use legacy to score a model the old way (default: white)')
 
     # recognize
     p = sub.add_parser('recognize', help='Run OCR on a single image file')

@@ -11,8 +11,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from .utils import resolve_paths
-from .dataset import TesseractDataset, collate_fn
-from .model import build_model
+from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
+from .model import build_model, output_lengths
 from .metrics import compute_metrics, compute_mean_rms, TrainingLogger
 from .report import render_progress, COER_KEYS
 from .command_utils import cmd_plot
@@ -81,12 +81,19 @@ def cmd_training(args):
             charset = json.load(f)
         print(f"  Loaded charset from {charset_path}")
 
+    # P0.1: white padding + real per-line lengths. --padding legacy = black padding and the
+    # full padded width for CTC / decoding, as in runs made before the fix (E1a faithful arm).
+    legacy_pad = getattr(args, 'padding', 'white') == 'legacy'
+    collate = legacy_collate_fn if legacy_pad else collate_fn
+    if legacy_pad:
+        print("  Padding:         legacy (black, full padded width for CTC)")
+
     train_ds = TesseractDataset(train_files, target_height=target_h, charset=charset)
     eval_loader = None
     if eval_files:
         eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=train_ds.charset)
         eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
-                                  num_workers=args.num_workers, collate_fn=collate_fn,
+                                  num_workers=args.num_workers, collate_fn=collate,
                                   pin_memory=device.type == 'cuda')
 
     with open(charset_path, 'w') as f:
@@ -98,7 +105,7 @@ def cmd_training(args):
         print(f"  Epochs={args.epochs} → max_iterations={max_iter}")
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                               num_workers=args.num_workers, collate_fn=collate_fn,
+                               num_workers=args.num_workers, collate_fn=collate,
                                pin_memory=device.type == 'cuda', drop_last=True)
 
     spec = args.net_spec
@@ -219,14 +226,15 @@ def cmd_training(args):
             if iteration >= max_iter: break
             imgs, labels = imgs.to(device), labels.to(device)
 
-            out = model(imgs)
+            out = model(imgs) if legacy_pad else model(imgs, ilens)
             if out.dim() == 4:
                 B, C, H, W = out.shape
                 out = out.permute(0, 3, 1, 2).contiguous().view(B, W, C * H)
 
             lp = F.log_softmax(out, dim=2).permute(1, 0, 2)
             T = lp.shape[0]
-            ail = torch.full((lp.shape[1],), T, dtype=torch.long)
+            ail = (torch.full((lp.shape[1],), T, dtype=torch.long) if legacy_pad
+                   else output_lengths(model, ilens, T))
 
             loss = ctc_loss_fn(lp, labels, ail, tlens)
             optimizer.zero_grad()
@@ -245,26 +253,27 @@ def cmd_training(args):
 
                 train_cer, train_wer, train_acc, train_coer, train_samples = compute_metrics(
                     model, [(imgs.cpu(), labels.cpu(), ilens, tlens)],
-                    train_ds, device, max_batches=1, collect_samples=3)
+                    train_ds, device, max_batches=1, collect_samples=3, use_real_lengths=not legacy_pad)
 
                 eval_cer, eval_wer, eval_acc, eval_loss_val, eval_coer = None, None, None, None, None
                 if eval_loader and iteration % (args.debug_interval * 5) == 0:
                     eval_cer, eval_wer, eval_acc, eval_coer, _ = compute_metrics(
-                        model, eval_loader, train_ds, device)
+                        model, eval_loader, train_ds, device, use_real_lengths=not legacy_pad)
                     # Compute eval loss
                     model.eval()
                     eval_losses = []
                     with torch.no_grad():
-                        for eb, (e_imgs, e_labels, _e_ilens, e_tlens) in enumerate(eval_loader):
+                        for eb, (e_imgs, e_labels, e_ilens, e_tlens) in enumerate(eval_loader):
                             if eb >= 50: break
                             e_imgs, e_labels = e_imgs.to(device), e_labels.to(device)
-                            e_out = model(e_imgs)
+                            e_out = model(e_imgs) if legacy_pad else model(e_imgs, e_ilens)
                             if e_out.dim() == 4:
                                 eB, eC, eH, eW = e_out.shape
                                 e_out = e_out.permute(0, 3, 1, 2).contiguous().view(eB, eW, eC * eH)
                             e_lp = F.log_softmax(e_out, dim=2).permute(1, 0, 2)
                             eT = e_lp.shape[0]
-                            e_ail = torch.full((e_lp.shape[1],), eT, dtype=torch.long)
+                            e_ail = (torch.full((e_lp.shape[1],), eT, dtype=torch.long) if legacy_pad
+                                     else output_lengths(model, e_ilens, eT))
                             e_loss = ctc_loss_fn(e_lp, e_labels, e_ail, e_tlens)
                             eval_losses.append(e_loss.item())
                     model.train()

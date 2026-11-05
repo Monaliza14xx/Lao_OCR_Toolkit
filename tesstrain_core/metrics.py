@@ -201,7 +201,15 @@ def compute_component_metrics(edits):
             
     return stats
 
-def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samples=0):
+def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samples=0,
+                    use_real_lengths=True):
+    """CER / WER / line accuracy / CoER of a model over (part of) a loader.
+
+    use_real_lengths: decode only the frames that belong to each line (P0.1), so a line's
+    prediction doesn't depend on the padding added for wider lines in its batch.
+    False reproduces the old behaviour (decode the whole padded width).
+    """
+    from .model import output_lengths
     model.eval()
     total_char_dist, total_chars = 0, 0
     total_wer_dist, total_wer_words = 0, 0
@@ -212,16 +220,19 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
     all_pairs = []
     batches = 0
     with torch.no_grad():
-        for imgs, labels, _ilens, tlens in loader:
+        for imgs, labels, ilens, tlens in loader:
             if batches >= max_batches: break
             imgs = imgs.to(device)
-            out = model(imgs)
+            out = model(imgs, ilens) if use_real_lengths else model(imgs)
             if out.dim() == 4:
                 B, C, H, W = out.shape
                 out = out.permute(0, 3, 1, 2).contiguous().view(B, W, C * H)
+            T = out.shape[1]
+            olens = (output_lengths(model, ilens, T) if use_real_lengths
+                     else torch.full((out.shape[0],), T, dtype=torch.long))
             off = 0
             for i in range(out.shape[0]):
-                dec = ctc_greedy_decode(out[i])
+                dec = ctc_greedy_decode(out[i, :olens[i].item()])
                 gt = labels[off:off + tlens[i].item()].cpu().tolist()
                 off += tlens[i].item()
                 pred_s = dataset.decode_labels(dec)

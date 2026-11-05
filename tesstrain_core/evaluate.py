@@ -5,7 +5,7 @@ import re
 import torch
 from torch.utils.data import DataLoader
 from .utils import resolve_paths
-from .dataset import TesseractDataset, collate_fn
+from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
 from .model import build_model
 from .metrics import compute_metrics, edit_distance, align_strings, compute_component_metrics, LAO_COMPONENT_MAP
 import csv
@@ -90,12 +90,14 @@ def cmd_evaluation(args):
     m = re.match(r'\[?\d+,(\d+),', ckpt.get('net_spec', ''))
     if m: target_h = int(m.group(1))
 
+    legacy_pad = getattr(args, 'padding', 'white') == 'legacy'
     eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=ckpt['charset'])
     eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
-                              num_workers=args.num_workers, collate_fn=collate_fn)
+                              num_workers=args.num_workers, collate_fn=legacy_collate_fn if legacy_pad else collate_fn)
 
     c_samples = -1 if getattr(args, 'csv', '') else 5
-    cer, wer, acc, coer, samples = compute_metrics(model, eval_loader, eval_ds, device, max_batches=9999, collect_samples=c_samples)
+    cer, wer, acc, coer, samples = compute_metrics(model, eval_loader, eval_ds, device, max_batches=9999, collect_samples=c_samples,
+                                                 use_real_lengths=not legacy_pad)
     print(f"\n{'=' * 50}")
     print(f"  Model:      {pt_path}")
     print(f"  Eval files: {len(eval_files)}")
