@@ -1045,6 +1045,7 @@ Layer breakdown:
 | `Fc<N>` | Dense / fully-connected: Linear(N) + ReLU | Seq | `Fc256` |
 | `O<d>c<N>` | Output: Linear layer, N = class count (`###` = auto) | Seq | `O1c###` |
 | `Lcn4[s],C,D[,SY,SX]` | LCNetV4-style stage: (3×3 conv to C channels with stride SY,SX if C or the stride changes), then D blocks of re-parameterisable 3×3 depthwise conv (+ SE with `s`) and a residual 1×1 ×2 channel mixer. Output stays 4-D, so any collapse token can follow | CNN | `Lcn4,48,2`, `Lcn4s,64,1,2,1` |
+| `Res18,W[,SX]` | ResNet18 backbone (4 stages × 2 basic blocks, widths W, 2W, 4W, 8W; BatchNorm, ReLU). The stem is a 3×3 conv with stride (2, SX) and no padding in x, so T = W/SX (default SX = 3, the same T as `Mp3,3`); the later stages use stride (2,1). A 64 px line reaches the collapse with 4 rows. `Res18,64` is the standard 11.17M-parameter ResNet18 (1-channel input). Output stays 4-D. Use SX ≤ 4: a stock ResNet18 (T = W/32) leaves fewer frames than labels | CNN | `Res18,16`, `Res18,32,2` |
 
 > **Note:** If a sequence layer follows a 2-D CNN layer without a height-collapse token, the
 > feature map is flattened (channels × height) per column automatically.
@@ -1362,6 +1363,10 @@ python3 experiments/step0_specs.py
 | `R-none` / `R-fwd` / `R-BiLSTM` | sequence model: none / `Lfx384` / `Lbx96 Lbx384` | 26,608 / 743,408 / 1,982,960 |
 | `C-K3` / `C-2conv` / `C-Lcn4` | CNN: `Ct3,3,16` / `+ Ct5,5,32` after the pool / `Lcn4` backbone | 929,008 / 946,192 / 1,020,808 |
 | `X-sx1` / `X-sx2` | pool x-stride 1 (T = W) / 2 (T ≈ W/2) with `Mpa` | 929,264 / 929,264 |
+| `E2-H4` / `E2-plain` | E2 controls: B0's CNN with only 4 rows reaching the collapse / plain 5-conv + BN CNN (~0.69M CNN params) | 929,264 / 1,667,824 |
+| `E2-R16` / `E2-R32` / `E2-R64` | E2: ResNet18 (`Res18,W`), T = W/3, 4 rows | 1,657,408 / 3,784,752 / 12,223,504 |
+| `E2-LS` / `E2-LT` | E2: LCNetV4-style small / tiny tier from `Lcn4` stages, T = W/3 (171 frames at 512 px) | 4,874,072 / 1,719,028 |
+| `E2-R16-sx2` / `E2-R16-sx4` / `E2-LS-sx4` | E2 sensitivity: native time resolution (T = W/2, W/4) | 1,657,408 / 1,657,456 / 4,874,072 |
 
 Print the training commands (seeds 1, 2, 3 by default) and add your data paths:
 

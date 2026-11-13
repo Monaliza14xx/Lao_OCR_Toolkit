@@ -50,8 +50,31 @@ CONFIGS = [
     ('C-2conv',   'cnn', spec(cnn='Ct5,5,16 Mp3,3 Ct5,5,32'), 'second conv after the pool'),
     ('C-Lcn4',    'cnn', spec(cnn='Lcn4,24,1 Mp3,3 Lcn4,48,2 Lcn4,64,1,2,1'),
      'LCNetV4-style backbone, ~1M params total'),
+    # E2 (EXPERIMENT_PLAN.md §1c): ResNet18 / LCNetV4-style backbones. Everything after the CNN is B0's.
+    # Time resolution kept at T = W/3 (Lcn4 stems pad by 1: 171 instead of 170 frames at W=512);
+    # 64 px lines reach the collapse with 4 rows (64 / 16) instead of B0's 21.
+    ('E2-H4',     'backbone', spec(cnn='Ct5,5,16 Mp3,3 Mpa5,1,5,1,0,0'),
+     'control: B0 CNN (416 params) but only 4 rows reach the collapse'),
+    ('E2-plain',  'backbone', spec(cnn='Ct5,5,32 Bn Mp3,3 Cr3,3,96 Bn Cr3,3,128 Bn Mpa3,1,3,1,0,0 '
+                                         'Cr3,3,192 Bn Cr3,3,192 Bn Mpa2,1,2,1,1,0'),
+     'control: plain 5-conv + BN CNN, ~0.69M CNN params (capacity without residual / metaformer design)'),
+    ('E2-R16',    'backbone', spec(cnn='Res18,16'), 'ResNet18, width 16, T = W/3'),
+    ('E2-R32',    'backbone', spec(cnn='Res18,32'), 'ResNet18, width 32, T = W/3'),
+    ('E2-R64',    'backbone', spec(cnn='Res18,64'), 'ResNet18, standard width 64, T = W/3'),
+    ('E2-LS',     'backbone', spec(cnn='Lcn4,48,0,2,3 Lcn4,96,0,2,1 Lcn4s,96,1 Lcn4,96,2 Lcn4,192,7,2,1 '
+                                       'Lcn4,384,3,2,1'),
+     'LCNetV4-style, paper "small" rec tier (1x96, 2x96, 7x192, 3x384)'),
+    ('E2-LT',     'backbone', spec(cnn='Lcn4,24,0,2,3 Lcn4,48,0,2,1 Lcn4s,48,1 Lcn4,48,1 Lcn4,96,3,2,1 '
+                                       'Lcn4,160,4,2,1'),
+     'LCNetV4-style, paper "tiny" rec tier (1x48, 1x48, 3x96, 4x160); tier layout not verified'),
+    # E2 sensitivity: each backbone's native time resolution (not T = W/3)
+    ('E2-R16-sx2', 'backbone-native', spec(cnn='Res18,16,2'), 'ResNet18 w16, T = W/2'),
+    ('E2-R16-sx4', 'backbone-native', spec(cnn='Res18,16,4'), 'ResNet18 w16, T = W/4'),
+    ('E2-LS-sx4',  'backbone-native', spec(cnn='Lcn4,48,0,2,2 Lcn4,96,0,2,2 Lcn4s,96,1 Lcn4,96,2 '
+                                               'Lcn4,192,7,2,1 Lcn4,384,3,2,1'),
+     'LCNetV4-style small tier, native stem: T = W/4'),
     # CTC time resolution (x-stride of the pool), CNN otherwise B0
-    ('X-sx1',     'xstride', spec(cnn='Ct5,5,16 Mpa3,3,3,1,0,1'), 'x-stride 1: T = W'),
+    ('X-sx1',    'xstride', spec(cnn='Ct5,5,16 Mpa3,3,3,1,0,1'), 'x-stride 1: T = W'),
     ('X-sx2',     'xstride', spec(cnn='Ct5,5,16 Mpa3,3,3,2,0,0'), 'x-stride 2: T ≈ W/2'),
 ]
 
@@ -78,7 +101,7 @@ def describe(net_spec, width=512):
 def _is_cnn(layer):
     name = layer.__class__.__name__
     return isinstance(layer, (torch.nn.Conv2d, torch.nn.MaxPool2d, torch.nn.BatchNorm2d, torch.nn.Tanh,
-                              torch.nn.ReLU, torch.nn.Dropout2d)) or name == 'Lcn4Stage'
+                              torch.nn.ReLU, torch.nn.Dropout2d)) or name in ('Lcn4Stage', 'ResNet18Backbone')
 
 
 def table(configs):

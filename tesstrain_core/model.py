@@ -463,6 +463,86 @@ class Lcn4Stage(nn.Module):
         return x
 
 
+# ── ResNet18 CNN backbone: Res18,<width>[,<sx>] ──────────────────────────────────────────────
+
+class _BasicBlock(nn.Module):
+    """ResNet basic block: 3×3 conv-BN-ReLU, 3×3 conv-BN, + shortcut, ReLU."""
+
+    def __init__(self, in_c, out_c, stride_y=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_c, out_c, 3, (stride_y, 1), 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_c)
+        self.conv2 = nn.Conv2d(out_c, out_c, 3, 1, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_c)
+        self.shortcut = None
+        if stride_y != 1 or in_c != out_c:
+            self.shortcut = nn.Sequential(nn.Conv2d(in_c, out_c, 1, (stride_y, 1), bias=False),
+                                          nn.BatchNorm2d(out_c))
+
+    def forward(self, x, widths=None):
+        if widths is not None:                 # 3×3 convs see zeros past the line end
+            x = _mask_width(x, widths, 0.0)
+        y = nn.functional.relu(self.bn1(self.conv1(x)))
+        if widths is not None:
+            y = _mask_width(y, widths, 0.0)
+        y = self.bn2(self.conv2(y))
+        return nn.functional.relu(y + (x if self.shortcut is None else self.shortcut(x)))
+
+
+class ResNet18Backbone(nn.Module):
+    """Res18,<width>[,<sx>]: ResNet18 as an OCR front end (4-D output, like Lcn4).
+
+    Standard ResNet18 stages (2 basic blocks each, widths w, 2w, 4w, 8w; default w = 64), with
+    the strides adapted to text lines (a stock ResNet18 divides the width by 32, which leaves
+    fewer CTC frames than labels):
+      * stem: 3×3 conv, stride (2, sx)  → rows /2, columns /sx. All the x-reduction is here,
+        so T ≈ W/sx (default sx = 3, the same T as B0's Mp3,3); the three later stages use
+        stride (2, 1): rows /8 more, columns kept.
+      * a 64 px line leaves 4 rows (64 / 16) and C = 8w channels.
+    The x part of the stem has no padding (kernel width max(3, sx)), so Res18,w,3 gives the
+    same T as Mp3,3 (170 frames for a 512 px line); sx = 1 pads by 1 and keeps every column.
+    Convolutions use Kaiming init (fan-out), BN weight 1, as in the torchvision ResNet.
+    """
+    uses_lengths = True
+
+    def __init__(self, in_c, width=64, sx=3):
+        super().__init__()
+        self.sx = sx
+        self.kx = max(3, sx)
+        self.px = 1 if sx == 1 else 0
+        w = [width, 2 * width, 4 * width, 8 * width]
+        self.stem = nn.Sequential(nn.Conv2d(in_c, w[0], (3, self.kx), (2, sx), (1, self.px), bias=False),
+                                  nn.BatchNorm2d(w[0]), nn.ReLU(inplace=True))
+        blocks, c = [], w[0]
+        for i, out_c in enumerate(w):
+            sy = 1 if i == 0 else 2
+            blocks += [_BasicBlock(c, out_c, sy), _BasicBlock(out_c, out_c, 1)]
+            c = out_c
+        self.blocks = nn.ModuleList(blocks)
+        self.out_channels = c
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+
+    def out_width(self, w):
+        return _conv_like_width(w, (3, self.kx), (2, self.sx), (1, self.px))
+
+    @staticmethod
+    def out_height(h):
+        for _ in range(4):                     # stem + three stride-2 stages: (h - 1) // 2 + 1
+            h = (h - 1) // 2 + 1
+        return h
+
+    def forward(self, x, lengths=None):
+        w = lengths
+        x = self.stem(x)
+        if w is not None:
+            w = self.out_width(w).clamp(1, x.size(3))
+        for blk in self.blocks:
+            x = blk(x, w)
+        return x
+
+
 def reparameterize_model(model):
     """Fuse every reparameterisable branch (Lcn4 token mixers) for inference. Call after
     model.eval(); the fused model gives the same outputs in eval mode. Returns the model."""
@@ -611,6 +691,16 @@ def build_model(spec, num_classes):
             if stage.down is not None:
                 cur_h = (cur_h + 2 - 3) // stride[0] + 1
             in_c = c
+            continue
+        # ── ResNet18 backbone: Res18,<width>[,<sx>] ──
+        m = re.match(r'^Res18,(\d+)(?:,(\d+))?$', tok)
+        if m:
+            width = int(m.group(1))
+            sx = int(m.group(2)) if m.group(2) else 3
+            net = ResNet18Backbone(in_c, width, sx)
+            layers.append(net)
+            cur_h = net.out_height(cur_h)
+            in_c = net.out_channels
             continue
         # ── Asymmetric MaxPool: Mpa<ky>,<kx>,<sy>,<sx>,<py>,<px> ──
         m = re.match(r'^Mpa(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)$', tok)

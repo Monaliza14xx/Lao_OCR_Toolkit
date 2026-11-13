@@ -92,6 +92,71 @@ Order matters: E1a first (faithful), then E1b, so each change is isolated. Only 
 Only the one factor under test. Dataset, iterations, optimizer, LR schedule, batch size, augmentation, evaluation sets, seeds and stop rule stay exactly as E1a (or E1b once the padding fix is adopted, stated explicitly in every table).
 If a later experiment needs a different setting (for example more frames per label in C1 needs more LSTM time steps, not a different LR), say so in the table.
 
+## 1c. Experiment 2 (E2): replace the CNN with ResNet18 or LCNetV4
+
+**Question:** with the thesis recipe fixed (E1), does a stronger CNN backbone, ResNet18 or PP-LCNetV4, reduce stacked-component errors (tone, upper vowel, lower vowel) compared with the thesis CNN (`Ct5,5,C Mp3,3`)?
+**Rule:** only the CNN changes. Everything after it (`Lfys64 Lfx96 Lrx96 Lfx{384|512} O1c###`), data, iterations, optimizer, scheduler, batch, seeds and stop rule stay as in E1. Anchor = `I64K5C16` (and `I64K5C32` if you want both).
+
+### What I checked (numbers measured here with random weights, input 64 × 272, 80 classes)
+
+LCNetV4 is the PP-OCRv6 backbone, a MetaFormer-style block (3×3 depthwise token mixer + 1×1 channel mixer) with re-parameterised depthwise convs; recognition mode uses (2,1) strides at stages 3 and 4 ([paper](https://arxiv.org/html/2606.13108), [PaddleOCR docs](https://www.paddleocr.ai/latest/en/version3.x/algorithm/PP-OCRv6/PP-OCRv6.html)).
+A PyTorch implementation is already in your Python environment (`transformers` 5.19: `transformers.models.pp_lcnet_v4`). ResNet18 is not (no `torchvision`), but it is ~30 lines.
+
+| Backbone (CNN only) | Params | MMACs / line | Output (C, H′, T) at W=272 | T / W | CNN-only CPU ms/line* |
+|---|---|---|---|---|---|
+| **B0** `Ct5,5,16 Mp3,3` | **416** | 7 | 16, 21, 90 | 0.331 | 0.8 |
+| **B0** `Ct5,5,32 Mp3,3` | **832** | 14 | 32, 21, 90 | 0.331 | 1.8 |
+| ResNet18, width 16, T = W/3 | 699,888 | 361 | 128, 4, 91 | 0.335 | 8.0 |
+| ResNet18, width 32, T = W/3 | 2,794,464 | 1,444 | 256, 4, 91 | 0.335 | 12.9 |
+| ResNet18, width 64 (standard), T = W/3 | 11,167,680 | 5,775 | 512, 4, 91 | 0.335 | 68.2 |
+| LCNetV4 "small" tier (HF default), T = W/3 | 2,683,464 | 1,466 | 384, 4, 91 | 0.335 | 36.0 |
+| LCNetV4 "tiny" tier (approximate, see below) | 519,964 | 180 | 160, 4, 68 | 0.25 | 8.6 |
+
+\*Measured on this Mac, batch 1, 10 repeats. Only relative values mean anything; RQ3 (< 25 ms/line on an office CPU) must be measured on the target machine with the full model.
+
+Four facts that decide the design:
+
+1. **The thesis CNN is tiny: 416 or 832 parameters.** Of the 929,264 total (C16), nearly all are LSTM. Any real backbone therefore changes the model from "LSTM with a one-layer front end" to "backbone with an LSTM on top": 0.7M to 11M extra parameters and 50 to 800× the CNN compute. "Better backbone" and "more capacity" cannot be separated unless capacity is controlled (arms C1 and C2 below).
+2. **Standard strides break CTC.** Stock ResNet18 (total stride 32) gives T = W/32. The average training line is about 271 px wide at H=64 with 14.9 labels (1,486,130 chars / 100,000 lines; 229 × 54 average size), so T ≈ 8.5 < 14.9 labels: CTC has no valid alignment. The repo uses `CTCLoss(zero_infinity=True)`, so such samples would silently contribute **zero loss** instead of raising an error. Frames per label: x-stride 3 → 6.1, 4 → 4.6, 8 → 2.3, 16 → 1.1, 32 → 0.57. Both backbones must keep the width stride low (OCR practice: stride (2,1) in later stages).
+3. **Time resolution is a CTC factor (C1 above), so keep it equal.** LCNetV4 recognition mode and the usual ResNet-OCR layouts give T = W/4 (or W/2), not the thesis' W/3. To change only the CNN, the primary arms put the whole x-reduction in the stem so that **T = W/3** exactly (ResNet18 stem stride (2,3); LCNetV4 `stem_strides=((2,3),1,1,(2,1),1)`, both ✓ measured T/W = 0.335). The native W/4 layouts run as a sensitivity arm. Do not use LCNetV4's own `avg_pool2d((3,2))` from the PP-OCRv6 tiny recogniser: it cuts T to W/8 (2.3 frames per label).
+4. **The height that reaches `Lfys64` changes from 21 rows to 4.** The backbones end at H′ = 4 (64 / 16). That is a second change besides "backbone". Control B0-H4 below isolates it.
+
+### Arms (all trained from scratch, grayscale input, thesis recipe, seeds {1, 2, 3})
+
+| ID | CNN | Role |
+|---|---|---|
+| **B0** | thesis `Ct5,5,16 Mp3,3` (from E1) | reference |
+| B0-H4 | `Ct5,5,16 Mp3,3 Mpa5,1,5,1,0,0` ✓ (same 416 CNN params, H′ = 4) | does fewer rows alone change CoER? |
+| C1 | plain deep CNN, ≈ 0.69M CNN params: `Ct5,5,32 Bn Mp3,3 Cr3,3,96 Bn Cr3,3,128 Bn Mpa3,1,3,1,0,0 Cr3,3,192 Bn Cr3,3,192 Bn Mpa2,1,2,1,0,0` ✓ (total 1,667,824) | capacity control with no residual / no metaformer design |
+| R-16 | ResNet18, width 16, T = W/3 (0.70M) | ResNet at matched CNN capacity to C1 |
+| R-32 | ResNet18, width 32 (2.79M) | |
+| R-64 | ResNet18, width 64 (11.2M, the standard model) | upper capacity bound; reports the cost |
+| L-S | LCNetV4 small tier, T = W/3 (2.68M) | |
+| L-T | LCNetV4 tiny tier (≈ 0.5M) | **needs verification**: I built it from the paper's table (1×48, 1×48, 3×96, 4×160, small stem); the exact block tuples (squeeze-excitation positions, stem channels) must be checked against the Hub config of `PP-OCRv6_tiny_rec`. The HF default config that I measured is the paper's *small* tier, not tiny |
+| Native-T | R-16 and L-S with their native layouts (T = W/2 and W/4) | sensitivity to time resolution |
+
+≈ 9 CNN variants × 3 seeds ≈ **27 runs** (plus B0 from E1). If compute is short, the minimum set is B0, B0-H4, C1, R-16, L-S, L-T (18 runs).
+Optional, labelled as a different experiment ("transfer"): initialise LCNetV4 from the PP-OCRv6 weights on the Hub. It adds pretraining on other scripts, so it must never share a table row with the from-scratch results.
+
+### Predictions (written before running)
+
+- **P-E2a:** backbones improve tone and upper-vowel CoER on synthetic data (larger vertical receptive field, more depth), but lower-vowel CoER improves less, because the collapse (`Lfys64`) and CTC still receive one mixed vector per column (H-CNN vs H-CTC; read together with D2 / D3).
+- **P-E2b:** the gain at matched parameters (C1, R-16, L-T) is much smaller than at R-64 / L-S, i.e. mostly capacity.
+- **P-E2c:** large backbones widen the synthetic-to-real gap. Your Exp. 4 already shows the pattern for filters ("Filter Depth Paradox": C = 64 gives a deletion spike on real scans), and the training set has only 4 fonts. Expect R-64 to win on test-A and not on test-R.
+- **P-E2d:** B0-H4 alone changes little. If it changes a lot, the earlier "backbone gain" is partly a row-count effect.
+
+Decision rule: a backbone is "better" only if it beats **both** B0 and its capacity control (C1) on stack-component CoER by more than 2σ on test-A, test-B (held-out fonts) *and* test-R, and stays inside the CPU budget.
+
+### Extra risks specific to E2
+
+- **BatchNorm and padding.** ResNet18 and LCNetV4 use BatchNorm; the thesis CNN does not. The repo's padding fix (P0.1, default `--padding white` with per-line lengths) makes *eval-mode* predictions independent of the batch (tested for `Res18` and `Lcn4`). In *training*, BN still averages over padded columns (they are zero after masking), so batch composition changes the batch statistics a little. Run E2 with the fix (E1b arm) as well as the faithful `--padding legacy` one, and use batch size 1 when comparing a BN model with B0.
+- **Re-parameterisation.** LCNetV4 trains with a 3-branch depthwise conv that fuses to one at inference. Train in the training form, fuse before timing and ONNX export; check that the fused model gives identical logits (max abs diff < 1e-4).
+- **LR / scheduler.** Same Adam 0.002 + scheduler as the thesis. A single learning rate is tuned for a model with no BatchNorm, so give each backbone one small LR check ({0.001, 0.002, 0.004}, 1 seed, short run) before the 3-seed runs, and report it. Otherwise a loss could just be "wrong LR".
+- **Early stop.** The ≤ 1% eval-CER rule favours models that reach the easy eval set fast and may stop a slower-converging backbone early. Report E2 with the fixed-50,000 arm (E1c) as well.
+- **Implementation (done, 2026-11-13).** `build_model` has a `Res18,<width>[,<sx>]` token (`ResNet18Backbone`, [model.py](../tesstrain_core/model.py)), and the LCNetV4 arms are written with the repo's existing `Lcn4` stage, so there is **no `transformers` dependency**. All E2 arms are in `experiments/step0_specs.py` (group `backbone`; native-T arms in `backbone-native`). Print them with `python3 experiments/step0_specs.py --only backbone`, or the 3-seed commands with `--commands --only backbone`. Tests: `tests/test_model.py` (shapes, T equals `Mp3,3`, padding independence, 11,167,680 params for `Res18,64`, backward), `tests/test_step0_specs.py`, `tests/test_training_run.py` (short real training with a `Res18` and an `Lcn4` spec, checkpoint reload). Full suite: 145 passed, 3 skipped.
+- **Measured differences from the table above.** Totals include the thesis LSTM head (`Lfys64 Lfx96 Lrx96 Lfx384`, whose input width grows with the backbone channels): E2-R16 1,657,408; E2-R32 3,784,752; E2-R64 12,223,504; E2-LT 1,719,028; E2-LS 4,874,072 (the paper's small tier is 2.68M for the backbone alone; the repo's `Lcn4` counts the 3-branch training form and its SE is per stage, not alternating). The `Lcn4` stems pad by 1, so those arms give 171 frames at 512 px instead of 170 (B0, ResNet18: 170).
+- **`Lcn4` is LCNetV4-*style*, not a bit-exact port.** The stem is two plain stride convs instead of the paper's branch stem, and SE sits on whole stages. Say "LCNetV4-style (our re-implementation)" in the paper; the Hub weights cannot be loaded into it.
+
 ## 2. Phase 0: protocol (blocking, ~1 week)
 
 | ID | Task | Done when |

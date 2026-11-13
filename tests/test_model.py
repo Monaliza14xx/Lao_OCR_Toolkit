@@ -96,3 +96,54 @@ def test_rep_dw_conv_fuses_to_one_depthwise_conv():
         conv.reparameterize()
         assert conv.fused.groups == 8 and conv.fused.kernel_size == (3, 3)
         assert torch.allclose(conv(x), ref, atol=1e-5)
+
+
+# ── Res18: ResNet18 CNN backbone ─────────────────────────────────────────────────────────
+RES18_SPEC = '[1,64,0,1 Res18,16 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]'
+
+
+def test_res18_gives_b0_time_resolution_and_four_rows():
+    b0 = build_model('[1,64,0,1 Ct5,5,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]'.replace('###', '80'), 80).eval()
+    model = build_model(RES18_SPEC.replace('###', '80'), 80).eval()
+    seen = {}
+    next(m for m in model if m.__class__.__name__ == 'SumLSTM').register_forward_hook(
+        lambda m, inp, out: seen.update(shape=inp[0].shape))
+    with torch.no_grad():
+        out = model(torch.randn(2, 1, 64, 512))
+    assert tuple(seen['shape']) == (2, 128, 4, 170)             # 8·16 channels, 64/16 rows, T = W/3
+    widths = torch.tensor([512, 301, 40])
+    assert output_lengths(model, widths).tolist() == output_lengths(b0, widths).tolist()   # same T as Mp3,3
+    assert out.shape == (2, 170, 80)
+
+
+@pytest.mark.parametrize('sx, frames', [(1, 512), (2, 255), (3, 170), (4, 128)])
+def test_res18_x_stride_sets_the_frame_count(sx, frames):
+    model = build_model(f'[1,64,0,1 Res18,8,{sx} Lfys16 Lfx16 O1c20]', 20).eval()
+    with torch.no_grad():
+        assert model(torch.randn(1, 1, 64, 512)).shape == (1, frames, 20)
+    assert output_lengths(model, torch.tensor([512])).tolist() == [frames]
+
+
+def test_res18_widths_make_each_line_independent_of_its_batch():
+    torch.manual_seed(0)
+    model = build_model('[1,32,0,1 Res18,8 Lfys16 Lfx16 Lrx16 O1c20]', 20)
+    _randomise_bn(model)
+    model.eval()
+    a, b = torch.randn(1, 1, 32, 90), torch.randn(1, 1, 32, 150)
+    batch = torch.ones(2, 1, 32, 150)                           # white padding, as in training
+    batch[0, :, :, :90], batch[1] = a, b
+    with torch.no_grad():
+        solo = model(a, torch.tensor([90]))
+        duo = model(batch, torch.tensor([90, 150]))
+    t = int(output_lengths(model, torch.tensor([90]))[0])
+    assert torch.allclose(solo[0, :t], duo[0, :t], atol=1e-4)
+
+
+def test_res18_trains_and_is_the_standard_size():
+    torch.manual_seed(0)
+    model = build_model('[1,64,0,1 Res18,64 Lfys64 Lfx96 O1c80]', 80)
+    backbone = next(m for m in model if m.__class__.__name__ == 'ResNet18Backbone')
+    assert sum(p.numel() for p in backbone.parameters()) == 11_167_680     # ResNet18, 1-channel 3×3 stem
+    small = build_model('[1,32,0,1 Res18,8 Lfys16 Lfx16 O1c20]', 20)
+    small(torch.randn(2, 1, 32, 60)).sum().backward()
+    assert all(p.grad is not None for p in small.parameters())

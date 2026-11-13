@@ -113,3 +113,18 @@ def test_compatible_weights_skip_a_resized_output_layer():
     out = str(len(dst) - 1)                                   # index of the output Linear
     assert {k for k, _ in skipped} == {f'{out}.weight', f'{out}.bias'}
     assert torch.equal(dst.state_dict()['0.weight'], src.state_dict()['0.weight']) and loaded
+
+
+@pytest.mark.parametrize('cnn', ['Res18,8', 'Lcn4,8,0,2,3 Lcn4,16,1,2,1'])
+def test_backbone_specs_train_end_to_end_and_reload(gt_dir, tmp_path, cnn):
+    """E2 backbones (ResNet18 / LCNetV4-style) go through the real training loop, white padding,
+    per-line CTC lengths, and the checkpoint rebuilds the same network from its saved spec."""
+    from tesstrain_core.model import build_model
+    spec = f'[1,24,0,1 {cnn} Lfys16 Lfx24 Lrx24 O1c###]'
+    train(gt_dir, tmp_path, '--net_spec', spec, '--seed', '3')
+    ckpt = torch.load(tmp_path / 'tiny_final.pt', weights_only=False)
+    rebuilt = build_model(ckpt['net_spec'].replace('###', str(ckpt['num_classes'])), ckpt['num_classes'])
+    rebuilt.load_state_dict(ckpt['model_state_dict'])
+    with open(tmp_path / 'training.log') as f:
+        rows = list(csv.DictReader(f))
+    assert rows and all(float(r['train_loss']) == float(r['train_loss']) for r in rows)   # finite, not NaN

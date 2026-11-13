@@ -29,7 +29,26 @@ def test_b0_is_the_thesis_model():
 def test_names_are_unique_and_groups_are_covered():
     names = [c[0] for c in step0.CONFIGS]
     assert len(names) == len(set(names))
-    assert {c[1] for c in step0.CONFIGS} == {'baseline', 'squash', 'rnn', 'cnn', 'xstride'}
+    assert {c[1] for c in step0.CONFIGS} == {'baseline', 'squash', 'rnn', 'cnn', 'xstride',
+                                             'backbone', 'backbone-native'}
+
+
+@pytest.mark.parametrize('name', [c[0] for c in step0.CONFIGS if c[1] == 'backbone'])
+def test_e2_backbones_keep_b0_time_resolution_and_leave_four_rows(name):
+    """E2 changes only the CNN: T stays W/3 (170, or 171 for the padded Lcn4 stems), 4 rows reach the collapse."""
+    params, rows, frames = step0.describe(dict((c[0], c[2]) for c in step0.CONFIGS)[name])
+    assert rows == 4 and frames in (170, 171)
+
+
+def test_e2_native_time_resolution_arms_really_differ():
+    frames = {c[0]: step0.describe(c[2])[2] for c in step0.CONFIGS if c[1] == 'backbone-native'}
+    assert frames == {'E2-R16-sx2': 255, 'E2-R16-sx4': 128, 'E2-LS-sx4': 128}
+
+
+def test_e2_everything_after_the_cnn_is_b0():
+    for name, group, s, _ in step0.CONFIGS:
+        if group.startswith('backbone'):
+            assert s.endswith(f'{step0.B0_SQUASH} {step0.B0_RNN} O1c###]'), name
 
 
 def test_lcn4_backbone_is_about_1m_params():
