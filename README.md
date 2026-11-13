@@ -777,6 +777,38 @@ python3 torch_train.py clean --model_name lao
 ./run.sh all          # plots + compare + PyTorch compare + TensorBoard
 ```
 
+### PP-OCRv6-tiny for Lao (CPU page OCR)
+
+The same recipe as [iapp/OpenThai2.0-OCR-Text](https://huggingface.co/iapp/OpenThai2.0-OCR-Text) uses for Thai: the PP-OCRv6-tiny text-line **detector as shipped** (no Lao training needed; it finds Lao lines including their tone marks and vowels above and below), and the PP-OCRv6-tiny **recognizer fine-tuned in PyTorch** with a new Lao output layer. The result is a ~2 MB + ~2 MB ONNX pair that reads whole pages on CPU.
+
+```bash
+pip install "transformers>=5.19" onnx onnxruntime opencv-python-headless pyclipper huggingface_hub
+
+# 1. Line data → dataset (keep whole real documents in --test, never split a page across sets)
+python3 to_paddleocr.py data/synth data/real-train --test data/real-test --out paddle_data
+
+# 2. Fine-tune (GPU recommended), keep the best val checkpoint, export rec.onnx, fetch det.onnx
+python3 train_ppocr_rec.py train --data paddle_data --out models/lao_tiny --epochs 30
+
+# 3. Read pages on CPU
+python3 lao_line_ocr.py models/lao_tiny page.png          # text, rows in reading order
+python3 lao_line_ocr.py models/lao_tiny page.png --json   # + box and confidence per line
+```
+
+`--init` sets the starting weights: the official `PaddlePaddle/PP-OCRv6_tiny_rec_safetensors` (default), a `.pt` state dict such as OpenThai's Thai recognizer (`pytorch/rec_weights.pt`; Thai and Lao share stacked-mark structure, so it is worth comparing), or `none`. Only the output layer starts fresh. Training prints val CER and accuracy (100 × (1 − CER), the number OpenThai reports) each epoch. `python3 train_ppocr_rec.py export --out models/lao_tiny` re-exports without training. If tone marks get cut off on your scans, try `--v-pad 0.2` at read time.
+
+The runtime (`lao_line_ocr.py`) needs only `onnxruntime`, `opencv`, `pyclipper` and `numpy`. It does not yet do OpenThai's extras: page rotation, deskew, column detection, or dropping low-confidence lines (stamps, signatures). For Markdown output, see PaddleOCR's PP-StructureV3.
+
+#### Export a dataset for PaddleOCR itself
+
+`to_paddleocr.py` turns image + `.gt.txt` line pairs (synthetic or real) into a PaddleOCR text-recognition dataset. Steps 1–3 above use the same output, and it also works with PaddleOCR's own `tools/train.py`:
+
+```bash
+python3 to_paddleocr.py data/synth data/real-train --test data/real-test --out paddle_data
+```
+
+It writes `train_list.txt` / `val_list.txt` (random `--val-ratio` split, default 5%), `test_list.txt` for the `--test` dirs, the copied images, and `lao_dict.txt` (one character per line, built from all labels). Labels are normalized to standard Lao storage order first (e.g. `ໍ` + `າ` → `ຳ`), the same as synthetic data. At the end it prints the `-o` overrides for PaddleOCR's `tools/train.py`: dictionary path, `use_space_char`, `max_text_length` and the label lists. Use `--no-copy` to keep images in place and write absolute paths. The Lao dictionary differs from the pretrained one, so PaddleOCR re-initializes the output heads and only the backbone weights carry over.
+
 ---
 
 ## 📁 Project Structure

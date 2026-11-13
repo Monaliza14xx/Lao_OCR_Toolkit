@@ -6,7 +6,8 @@ import pytest
 from conftest import ROOT
 
 SCRIPTS = ['torch_train.py', 'gen_data_from_text.py', 'gen_documents.py', 'segment_document.py',
-           'compare_line_stats.py', 'tesseract_tools.py']
+           'compare_line_stats.py', 'tesseract_tools.py', 'to_paddleocr.py',
+           'train_ppocr_rec.py', 'lao_line_ocr.py']
 
 
 @pytest.mark.parametrize('script', SCRIPTS)

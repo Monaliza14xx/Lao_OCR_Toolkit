@@ -22,6 +22,14 @@ fonttools>=4.40
 scipy>=1.10
 pypdfium2>=4.0
 
+# PP-OCRv6-tiny Lao pipeline (train_ppocr_rec.py / lao_line_ocr.py); tested with transformers 5.19
+transformers>=5.19
+huggingface_hub
+onnx
+onnxruntime
+opencv-python-headless
+pyclipper
+
 
 # ============================================================
 #  GPU – PyTorch with CUDA
