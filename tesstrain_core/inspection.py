@@ -289,7 +289,7 @@ def cmd_inspection(args: Namespace):
     selected_indices.sort()     # keep a stable order for nicer numbered output
     
     samples = [files[i] for i in selected_indices]
-    dataset = TesseractDataset(samples)
+    dataset = TesseractDataset(samples, charset=ckpt.get('charset'))   # decode with the model's own labels
     print(f"  Seed:         {seed if seed is not None else 'random'}")
     print(f"  Inspecting:   {len(samples)} images")
     os.makedirs(out_base, exist_ok=True)
@@ -1006,7 +1006,7 @@ def cmd_wer_distribution(args):
             print("  ERROR: No .lstmf files found.")
             return
 
-        dataset = TesseractDataset(files)
+        dataset = TesseractDataset(files, charset=ckpt.get('charset'))   # the model's own labels
         inv_charset = dataset.inv_charset if hasattr(dataset, 'inv_charset') else {}
         print(f"  Eval samples: {len(dataset)} (.lstmf files)")
 
@@ -1316,7 +1316,7 @@ def cmd_confusion_matrix(args):
         if not files:
             print("  ERROR: No .lstmf files found.")
             return
-        dataset = TesseractDataset(files)
+        dataset = TesseractDataset(files, charset=ckpt.get('charset'))   # the model's own labels
         inv_charset = dataset.inv_charset if hasattr(dataset, 'inv_charset') else {}
         print(f"  Eval samples: {len(dataset)} (.lstmf)")
         model.eval()

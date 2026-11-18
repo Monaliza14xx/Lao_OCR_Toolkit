@@ -557,6 +557,7 @@ python3 torch_train.py training --model_name lao \
 | `--lr_patience` | `5` | `plateau`: evaluations without improvement before reducing. One evaluation runs every 5 × `--debug_interval` iterations, so 5 = 2,500 iterations at the default interval |
 | `--min_lr` | `1e-5` | `plateau`: lower bound for the LR |
 | `--padding` | `white` | `white` = pad batches with the paper colour and use every line's real length (CTC, decoding, right-to-left layers). `legacy` = black padding over the full width, as before the fix; use it only to reproduce old runs (also accepted by `evaluation`) |
+| `--label_unit` | `codepoint` | What one CTC label is. `codepoint` = one per character (as before). `cluster` = a consonant with its tone mark and upper / lower vowels (and subscript ລ) is one label, e.g. `ນ້ ຳ`. `cluster_am` = as `cluster`, and a following ຳ joins it (`ນ້ຳ`). `open` = `cluster`, but only clusters seen `--min_cluster_count` times (default 20) get a label; rarer ones are spelled as characters. Every unit keeps all single characters, decodes to the same text, and is saved in the checkpoint, so `evaluation`, `compare` and `recognize` need no flag. See `tesstrain_core/label_units.py` |
 | `--data_dir` | `data` | Root data directory |
 | `--tensorboard` | `True` | Log live metrics to TensorBoard |
 | `--tensorboard_dir` | `data/.../tensorboard` | Custom TensorBoard log directory |
@@ -841,7 +842,6 @@ Lao_OCR_Toolkit/
 │   ├── EXPERIMENT_PLAN.md      # PhD experiment plan (Step 0 part swaps and later phases)
 │   ├── step0_specs.py          # Step 0 net_specs, parameter table, training commands
 │   └── …                       # enrichment, paper figures (see experiments/README.md)
-├── tests/                      # pytest suite (classes, metrics, report, model, padding, training run, document pipeline)
 ├── .github/workflows/ci.yml    # Lint + tests on every push / pull request
 ├── LSTM_WEIGHTS.md             # Why PyTorch LSTMs have slightly more parameters than Tesseract's
 ├── metrics.md                  # How CER / WER / CoER are computed
@@ -1344,7 +1344,7 @@ sequence model, the CNN, and the CTC time resolution (x-stride). The toolkit pie
 
 | Plan item | What | Where |
 |---|---|---|
-| P0.1 | White padding + real per-line lengths; batch size 1 and 64 give the same predictions | `--padding` (default `white`), `tests/test_padding.py` |
+| P0.1 | White padding + real per-line lengths; batch size 1 and 64 give the same predictions | `--padding` (default `white`) |
 | P0.2 | Strict CER and CluER next to the lenient CER | `evaluation`, `training.log`, `tesstrain_core/metrics.py` |
 | P0.4 | `--seed`; git commit, seed, resolved spec and all args in `config.json`; optional `ReduceLROnPlateau` | `--seed`, `--lr_scheduler plateau` |
 | — | Modern CNN backbone token | `Lcn4` (see [VGSL](#network-architecture-vgsl)) |
@@ -1405,17 +1405,11 @@ These are known issues in the current code. Keep them in mind when you read or r
 
 ```bash
 pip install -r requirements-dev.txt
-pytest            # unit + end-to-end tests (about 30 s on CPU)
 ruff check .      # lint
 ```
 
-The tests cover the Lao character classes, CER/WER/CoER, strict CER and CluER, the training
-report, text normalization, the VGSL model builder (including `Lcn4` and its fused form),
-batch-size independence of predictions, a short end-to-end training run (seed, `config.json`,
-LR scheduler), the Step 0 spec list, the web UI server, the command-line entry points, and the document
-pipeline end to end (synthetic letter → layout analysis → labelled line crops). The
-document test needs Pillow built with libraqm and is skipped otherwise. GitHub Actions
-runs lint and tests on every push and pull request.
+The `tests/` folder is kept local and is not part of the repository (it is in `.gitignore`).
+GitHub Actions runs lint on every push and pull request.
 
 Research scripts that reproduce the original experiments live in
 [`experiments/`](experiments/README.md); run them from the repository root.

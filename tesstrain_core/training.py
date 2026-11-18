@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from .utils import resolve_paths, set_seed, git_info
 from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
+from .label_units import DEFAULT_MIN_CLUSTER_COUNT, infer_unit
 from .model import build_model, output_lengths
 from .metrics import compute_metrics, compute_mean_rms, TrainingLogger
 from .report import render_progress, COER_KEYS
@@ -43,6 +44,7 @@ def _save(model, optimizer, it, ds, args, path, scheduler=None):
     ckpt = {'iteration': it, 'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'charset': ds.charset, 'num_classes': ds.num_classes,
+            'label_unit': getattr(ds, 'label_unit', 'codepoint'),
             'net_spec': args.net_spec, 'model_name': args.model_name,
             'seed': getattr(args, 'seed', None)}
     if scheduler is not None:
@@ -113,10 +115,20 @@ def cmd_training(args):
     if legacy_pad:
         print("  Padding:         legacy (black, full padded width for CTC)")
 
-    train_ds = TesseractDataset(train_files, target_height=target_h, charset=charset)
+    label_unit = getattr(args, 'label_unit', 'codepoint')
+    if charset is not None:
+        found = infer_unit(charset)
+        if found != label_unit and not {found, label_unit} <= {'cluster', 'open'}:
+            print(f"Error: {charset_path} holds a '{found}' charset but --label_unit is '{label_unit}'. "
+                  "Use another --output_dir or delete charset.json.")
+            sys.exit(1)
+    train_ds = TesseractDataset(train_files, target_height=target_h, charset=charset,
+                                label_unit=label_unit,
+                                min_cluster_count=getattr(args, 'min_cluster_count', DEFAULT_MIN_CLUSTER_COUNT))
     eval_loader = None
     if eval_files:
-        eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=train_ds.charset)
+        eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=train_ds.charset,
+                                   label_unit=train_ds.label_unit)
         eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
                                   num_workers=args.num_workers, collate_fn=collate,
                                   pin_memory=device.type == 'cuda')
@@ -220,6 +232,7 @@ def cmd_training(args):
         'train_lines': len(train_ds),
         'eval_lines': len(eval_loader.dataset) if eval_loader else 0,
         'padding': 'legacy' if legacy_pad else 'white',
+        'label_unit': train_ds.label_unit,
         'torch': torch.__version__,
         'cuda': torch.version.cuda if device.type == 'cuda' else None,
         'device': torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu',

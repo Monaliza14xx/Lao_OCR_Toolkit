@@ -92,7 +92,8 @@ def cmd_evaluation(args):
     if m: target_h = int(m.group(1))
 
     legacy_pad = getattr(args, 'padding', 'white') == 'legacy'
-    eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=ckpt['charset'])
+    eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=ckpt['charset'],
+                               label_unit=ckpt.get('label_unit'))
     eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
                               num_workers=args.num_workers, collate_fn=legacy_collate_fn if legacy_pad else collate_fn)
 

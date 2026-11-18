@@ -157,6 +157,84 @@ Decision rule: a backbone is "better" only if it beats **both** B0 and its capac
 - **Measured differences from the table above.** Totals include the thesis LSTM head (`Lfys64 Lfx96 Lrx96 Lfx384`, whose input width grows with the backbone channels): E2-R16 1,657,408; E2-R32 3,784,752; E2-R64 12,223,504; E2-LT 1,719,028; E2-LS 4,874,072 (the paper's small tier is 2.68M for the backbone alone; the repo's `Lcn4` counts the 3-branch training form and its SE is per stage, not alternating). The `Lcn4` stems pad by 1, so those arms give 171 frames at 512 px instead of 170 (B0, ResNet18: 170).
 - **`Lcn4` is LCNetV4-*style*, not a bit-exact port.** The stem is two plain stride convs instead of the paper's branch stem, and SE sits on whole stages. Say "LCNetV4-style (our re-implementation)" in the paper; the Hub weights cannot be loaded into it.
 
+## 1d. Experiment 3 (E3): grapheme-cluster CTC (learning from AksonOCR-Lite)
+
+**Idea:** instead of one CTC label per code point, give CTC one label per *stack*: a consonant together with its upper / lower vowels and tone mark (ນ້, ບໍ່, ຜູ້). This directly targets the morphological-intersection problem (H-CTC, C2 above): marks that sit in the same column are no longer separate labels that must be emitted in the right order.
+
+### What AksonOCR-Lite does (read from [its repo](https://github.com/Remtir/AksonOCR-Lite), Apache-2.0, cloned read-only)
+
+| Fact | Source |
+|---|---|
+| Thai recogniser predicts whole **grapheme clusters**: consonant + upper/lower vowels + tone marks = one class. 2,455 output classes, 2,149 of them clusters; the rest are single characters | `MODEL_CARD.md`, README |
+| Decoding is a plain lookup: `rec_charset.json` maps each class id to its output string, and greedy CTC joins them (`aksonocr_lite/rec.py`, `_decode`) | `rec.py` |
+| Claimed benefits: marks always in Unicode order, only real clusters exist (no floating tone mark), shorter label sequence (their example line: 22 → 15 symbols) | README |
+| Backbone: PP-OCRv6-tiny (PPLCNetV4 + SVTR neck) with a CTC head, ~1.5M params, input height 48, **fine-tuned from the PaddlePaddle checkpoint** | `MODEL_CARD.md` |
+| Lines are batched only with lines of nearly the same width, because right-padding changes the SVTR neck's attention (about 3 points of exact match). Same lesson as our padding fix | README |
+| Their result: 88.6% exact match, 1.15 NED×100, 8.1 ms/line (1 CPU thread) on 469 internal line crops | `BENCHMARKS.md` |
+
+What it does **not** give us:
+- **No training code, data or recipe** (the model card says so). Only the inference side and the vocabulary idea are visible. How clusters are segmented and how rare clusters are handled is not published.
+- **No ablation.** The benchmark compares against another recogniser (OpenThai), never cluster vs character tokens with the same network. The *benefit of clusters is a claim, not a measurement*. E3 supplies the measurement, which is itself a contribution.
+- Thai only. No Lao.
+
+### What Lao looks like with the same idea (measured on your corpora, not on Thai)
+
+Cluster = a non-mark character plus all following Lao combining marks (Unicode category Mn: ັ ິ ີ ຶ ື ົ ໍ ໌ ຸ ູ ຼ ່ ້ ໊ ໋), after NFC and the repo's `fold_sara_am`. Prepositive vowels (ເ ແ ໂ ໃ ໄ), rear vowels (ະ າ ຳ), spaces, digits and Latin stay single tokens.
+
+| | dictionary corpus (`training_corpus.txt`, 118,854 lines) | real-document text (`paper_revision/…/train_corpus.txt`, 100,000 lines) |
+|---|---|---|
+| labels per line, code points → clusters | 11.7 → 9.1 (**22% shorter**) | 16.8 → 13.9 (**17% shorter**) |
+| distinct code points / cluster tokens | 55 / 864 (824 stacked) | 94 / 912 (834 stacked) |
+| tokens that are stacked | 23.6% (4.6% carry ≥ 2 marks) | 17.2% (3.3%) |
+| coverage by the top 100 / 300 / 500 tokens | 87.7% / 97.7% / **99.5%** | 88.1% / 97.8% / 99.5% |
+| token types seen ≥ 5 / ≥ 20 / ≥ 100 times | 808 / 618 / 376 | 828 / 651 / 403 |
+
+- **The Lao vocabulary is small:** about 900 classes against Thai's 2,149 clusters, and almost all are frequent enough to learn (808 of 864 types seen ≥ 5 times in 1.09M tokens). Rare-class sparsity is a smaller risk than for Thai.
+- **The sequence is only 17–22% shorter** (Thai example: 32%). The gain for CTC is real but modest; the main expected effect is the *order and presence of marks*, not the frame budget.
+- **Stack structure by type:** tone + upper vowel 357, upper vowel 201, lower vowel + tone 96, tone only 85, lower vowel 58, subscript ຼ combos ~16.
+- **Corpus hygiene problem:** the cluster table contains sequences that look invalid (two or three tone marks on one consonant, two upper vowels; 7 types in the dictionary corpus), and the real-document text contains a Khmer letter (`បັ`). A closed cluster vocabulary only means "no impossible output" if the corpus is filtered first. `training_corpus.txt` is exactly 4 MiB and its last line ends in a broken character (`ພະແນ�`), so it looks cut; drop that line.
+- **ຳ is an open design question.** In `ນ້ຳ` the tone mark is stored before ຳ but drawn over its ring. A tokenizer that keeps ຳ separate (T1) cuts the visual stack in two; attaching the trailing ຳ (T2) gives 924 types and keeps the stack together. Which is better is an empirical question.
+
+### Arms (backbone fixed: B0, then repeat with the best E2 backbone; 3 seeds each)
+
+| ID | Label unit | Classes (approx.) | Notes |
+|---|---|---|---|
+| **T0** | code points (**B0**) | 80 | reference |
+| T1 | stack cluster: base + following marks; ຳ separate | ~900 + single characters | closed vocabulary like AksonOCR |
+| T2 | T1 + trailing ຳ attached | ~920 + singles | tests the ຳ question |
+| T3 | **open** vocabulary: all single code points + clusters seen ≥ N times (N = 20), greedy longest match; rarer stacks fall back to base + marks | ~620 + 80 | keeps every string representable (a closed vocabulary cannot output an unseen cluster) |
+
+Everything else (CNN, `Lfys64 Lfx96 Lrx96 Lfx384`, data, iterations, optimizer, stop rule) as in E1. Strings are decoded by concatenation, so **CER, WER and CoER are still computed on code points** and stay comparable with T0. Also report the token-level error (CluER, already in `metrics.py`), frames per label, and the D1/D5 breakdown: marks deleted, marks swapped, whole-cluster substitutions.
+
+### Predictions (before running)
+
+- **P-E3a:** T1/T2/T3 reduce mark **order** errors (D5) to ~0 and reduce mark deletions, because a mark no longer needs its own CTC frame.
+- **P-E3b:** the gain is largest on tone and upper vowel; lower vowel improves less if its errors are visual (a blurred ຸ/ູ), because a wrong mark now becomes one wrong cluster class.
+- **P-E3c:** T1/T2 lose on **rare clusters** and on unseen sequences (closed vocabulary); T3 recovers them. Expect T3 ≥ T1 on real scans.
+- **P-E3d:** the CER gain on test-R is small or none: the real-scan gap in the thesis (80% vs 91.5%) comes mostly from fonts and noise, not from label order.
+
+### Implementation (done, 2026-11-18)
+
+`--label_unit {codepoint,cluster,cluster_am,open}` and `--min_cluster_count N` (default 20, `open` only) in `torch_train.py training`; default `codepoint`, so B0 is unchanged (same charset ids, same labels; tested).
+- `tesstrain_core/label_units.py`: `segment`, `build_charset`, `encode`, `infer_unit`. Clusters come from `lao_classes.split_clusters`, the same units as CluER.
+- **Every unit keeps every single character of the training text in its charset.** A cluster missing from the charset is spelled as its characters, so any string B0 can write is writable and the ground truth used for CER is never shortened by the label unit (the metrics rebuild the GT string from the labels). Under `cluster` / `cluster_am` those single marks have almost no training examples, so the vocabulary is closed in practice; `open` trains them.
+- The unit is saved in the checkpoint (`label_unit`) and in `config.json`; `evaluation`, `compare`, `recognize` and `inspection` read it (or infer it from the charset), so they need no flag. Training refuses an existing `charset.json` of another unit in the same `--output_dir`. `inspection` now decodes with the checkpoint's charset instead of one rebuilt from the files (it was only correct for code points by luck of identical sorting).
+- The dataset prints labels per line vs characters per line and the number of characters it had to drop.
+- Text is **not** normalised (no NFC / `fold_sara_am`) in any unit, so the arms differ only in the label unit; a corpus with unfolded ໍ + າ gives `ໍ` marks inside clusters instead of `ຳ`.
+- Not done: the invalid-sequence corpus filter (item 4 of the earlier list) and the PP-OCRv6-tiny pipeline (`train_ppocr_rec.py`), which still uses one label per character. DAWG-constrained decoding (`recognize --wordlist`) is untested with cluster labels.
+- Checked once during development (segmentation, exact round trip for every unit, open-vocabulary fallback, B0 charset unchanged, short training + `evaluation` for each unit); no test files were added to the repo.
+
+Run the arms (only the flag changes; B0 = no flag):
+
+```bash
+python3 torch_train.py training --model_name E3-T1-r1 --label_unit cluster \
+    --net_spec "[1,64,0,1 Ct5,5,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]" \
+    --ground_truth_dir data/lao-ground-truth --batch_size 64 --max_iterations 50000 \
+    --learning_rate 0.002 --target_error_rate 0.001 --debug_interval 500 \
+    --output_dir data/runs/E3-T1-r1 --force_GPU
+# T2: --label_unit cluster_am      T3: --label_unit open --min_cluster_count 20
+```
+
 ## 2. Phase 0: protocol (blocking, ~1 week)
 
 | ID | Task | Done when |

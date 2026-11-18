@@ -162,6 +162,14 @@ Get help for a subcommand:
     g.add_argument('--padding', default='white', choices=['white', 'legacy'],
                    help='Batch padding: white = pad with paper colour and use each line\'s real length for '
                         'CTC/decoding; legacy = black padding over the full width, as before the fix (default: white)')
+    g.add_argument('--label_unit', default='codepoint', choices=['codepoint', 'cluster', 'cluster_am', 'open'],
+                   help='What one CTC label is: codepoint (default, as before); cluster = a consonant '
+                        'with its tone mark / upper / lower vowels; cluster_am = cluster, and a '
+                        'following ຳ joins it; open = cluster, but only clusters seen at least '
+                        '--min_cluster_count times get their own label (EXPERIMENT_PLAN.md §1d)')
+    g.add_argument('--min_cluster_count', type=int, default=20, metavar='N',
+                   help='open: a cluster needs N occurrences in the training text to become a label '
+                        '(default: 20)')
     g.add_argument('--force_GPU', action='store_true',
                    help='Require GPU for training; fail if not available')
     g = p.add_argument_group('stopping criteria')

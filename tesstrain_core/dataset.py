@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 
+from . import label_units
+
 class LstmfReader:
     """Reads Tesseract .lstmf binary files."""
 
@@ -75,7 +77,14 @@ def load_lstmf(filepath):
         return LstmfReader(f.read()).read_document()
 
 class TesseractDataset(Dataset):
-    def __init__(self, lstmf_files, target_height=48, charset=None):
+    """Line images + labels from .lstmf files.
+
+    label_unit: what one CTC label is (see tesstrain_core/label_units.py): 'codepoint' (default,
+    as before), 'cluster', 'cluster_am' or 'open' (with min_cluster_count). With a given charset
+    (eval sets, checkpoints) the unit is read from the charset when not passed.
+    """
+    def __init__(self, lstmf_files, target_height=48, charset=None, label_unit=None,
+                 min_cluster_count=label_units.DEFAULT_MIN_CLUSTER_COUNT):
         self.samples = []
         self.target_height = target_height
         self.charset = charset or {}
@@ -89,21 +98,39 @@ class TesseractDataset(Dataset):
             except Exception as e:
                 print(f"    Warning: {fp}: {e}")
 
-        if not self.charset:
-            chars = set()
-            for _, text in self.samples:
-                chars.update(text)
-            self.charset = {c: i + 1 for i, c in enumerate(sorted(chars))}
+        if self.charset:
+            found = label_units.infer_unit(self.charset)
+            if label_unit and label_unit != found and not {label_unit, found} <= {'cluster', 'open'}:
+                raise ValueError(f'label unit {label_unit!r} does not match the given charset ({found!r})')
+            self.label_unit = label_unit or found
+        else:
+            self.label_unit = label_unit or 'codepoint'
+            self.charset = label_units.build_charset((t for _, t in self.samples), self.label_unit,
+                                                     min_cluster_count)
 
         self.inv_charset = {v: k for k, v in self.charset.items()}
         self.num_classes = len(self.charset) + 1
-        print(f"  {len(self.samples)} samples, {self.num_classes} classes (incl. CTC blank)")
+        print(f"  {len(self.samples)} samples, {self.num_classes} classes (incl. CTC blank)"
+              + ('' if self.label_unit == 'codepoint' else f', label unit: {self.label_unit}'))
+        if self.label_unit != 'codepoint' and self.samples:
+            self._report_labels()
+
+    def _report_labels(self):
+        """Labels per line and characters the charset cannot write, for the training log."""
+        n_chars = n_labels = dropped = 0
+        for _, text in self.samples:
+            ids, d = label_units.encode(text, self.charset, self.label_unit)
+            n_chars += len(text); n_labels += len(ids); dropped += d
+        n = len(self.samples)
+        print(f"  Labels per line: {n_labels / n:.1f} (characters: {n_chars / n:.1f}, "
+              f"{100 * (1 - n_labels / max(n_chars, 1)):.1f}% fewer)"
+              + (f"; {dropped} characters not in the charset are dropped" if dropped else ''))
 
     def __len__(self):
         return len(self.samples)
 
     def encode_text(self, text):
-        return [self.charset[c] for c in text if c in self.charset]
+        return label_units.encode(text, self.charset, self.label_unit)[0]
 
     def decode_labels(self, labels):
         return ''.join(self.inv_charset.get(l, '?') for l in labels if l != 0)
