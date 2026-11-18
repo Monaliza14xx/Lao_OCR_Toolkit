@@ -66,7 +66,8 @@ CONFIGS = [
      'LCNetV4-style, paper "small" rec tier (1x96, 2x96, 7x192, 3x384)'),
     ('E2-LT',     'backbone', spec(cnn='Lcn4,24,0,2,3 Lcn4,48,0,2,1 Lcn4s,48,1 Lcn4,48,1 Lcn4,96,3,2,1 '
                                        'Lcn4,160,4,2,1'),
-     'LCNetV4-style, paper "tiny" rec tier (1x48, 1x48, 3x96, 4x160); tier layout not verified'),
+     'LCNetV4-style, PP-OCRv6 "tiny" rec tier (1x48, 1x48, 3x96, 4x160; layout as TINY_CONFIG in '
+     'train_ppocr_rec.py, SE per stage instead of per block)'),
     # E2 sensitivity: each backbone's native time resolution (not T = W/3)
     ('E2-R16-sx2', 'backbone-native', spec(cnn='Res18,16,2'), 'ResNet18 w16, T = W/2'),
     ('E2-R16-sx4', 'backbone-native', spec(cnn='Res18,16,4'), 'ResNet18 w16, T = W/4'),

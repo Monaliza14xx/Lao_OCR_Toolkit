@@ -83,6 +83,7 @@ All recipes use the **same data, lists, batch size, iterations and learning rate
 | Thesis text says ReduceLROnPlateau | only if the old `training.log` shows a falling `learning_rate` column: then add `--lr_scheduler plateau` (settings unknown) |
 | **E1c** equal training for all | add `--target_error_rate 0` |
 | **E3** cluster CTC labels | `--label_unit cluster` (T1), `--label_unit cluster_am` (T2) or `--label_unit open --min_cluster_count 20` (T3); B0 = no flag. Use a new `--output_dir`: a folder that already has a `charset.json` of another unit is refused |
+| E3 on PP-OCRv6-tiny (T = W/8) | `python3 train_ppocr_rec.py train --data paddle_data --out models/lao_tiny_cluster --label_unit cluster` (B0 of this table = same command without `--label_unit`) |
 | Repeat with another seed | `--seed 2`, `--seed 3` (also change `--model_name` / `--output_dir`) |
 
 Minimal reproducible command (B0, seed 1, white padding):

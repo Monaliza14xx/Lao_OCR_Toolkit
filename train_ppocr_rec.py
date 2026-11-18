@@ -21,6 +21,7 @@ Output dir: best/ (transformers checkpoint, lowest val CER), rec.onnx, rec_dict.
 """
 
 import argparse
+import json
 import math
 import os
 import random
@@ -36,6 +37,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from gen_data_from_text import normalize_lao_text
 from lao_line_ocr import REC_HEIGHT, load_bgr, load_chars, pad_batch, prep_line, ctc_greedy
+from tesstrain_core import label_units
 from tesstrain_core.metrics import strict_cer_counts
 
 DEFAULT_INIT = 'PaddlePaddle/PP-OCRv6_tiny_rec_safetensors'
@@ -116,19 +118,32 @@ class ProbsModel(nn.Module):
 #  Data
 # ----------------------------------------------------------------------------
 
+def read_labels(list_file):
+    """[(image path, label)] from a PaddleOCR list file ("<path>\\t<label>" per line)."""
+    rows = []
+    with open(list_file, encoding='utf-8') as f:
+        for line in f:
+            path, _, label = line.rstrip('\n').partition('\t')
+            if label:
+                rows.append((path, label))
+    return rows
+
+
 class LineList(Dataset):
-    def __init__(self, data_dir, list_file, char_to_id, max_w):
-        self.data_dir, self.char_to_id, self.max_w = data_dir, char_to_id, max_w
+    """Line images and their CTC labels. unit = what one label is (tesstrain_core/label_units.py):
+    'codepoint' (one per character, as before) or a Lao cluster unit. A cluster missing from the
+    dictionary is spelled as its characters; a line with a character missing from the
+    dictionary is skipped."""
+
+    def __init__(self, data_dir, list_file, char_to_id, max_w, unit='codepoint'):
+        self.data_dir, self.max_w = data_dir, max_w
         self.rows, unknown = [], 0
-        with open(list_file, encoding='utf-8') as f:
-            for line in f:
-                path, _, label = line.rstrip('\n').partition('\t')
-                if not label:
-                    continue
-                if any(c not in char_to_id for c in label):
-                    unknown += 1
-                    continue
-                self.rows.append((path, label))
+        for path, label in read_labels(list_file):
+            ids, dropped = label_units.encode(label, char_to_id, unit)
+            if dropped:
+                unknown += 1
+                continue
+            self.rows.append((path, label, ids))
         if unknown:
             print(f'  {list_file}: skipped {unknown} lines with characters missing from the dictionary')
 
@@ -136,9 +151,9 @@ class LineList(Dataset):
         return len(self.rows)
 
     def __getitem__(self, i):
-        path, label = self.rows[i]
+        path, label, ids = self.rows[i]
         x = prep_line(load_bgr(os.path.join(self.data_dir, path)), REC_HEIGHT, self.max_w)
-        return x, [self.char_to_id[c] for c in label], label
+        return x, ids, label
 
 
 def collate(items):
@@ -180,11 +195,21 @@ def cmd_train(args):
     torch.manual_seed(args.seed)
     random.seed(args.seed)
     dict_path = os.path.join(args.data, 'lao_dict.txt')
-    chars = load_chars(dict_path)
+    train_list = os.path.join(args.data, 'train_list.txt')
+    dict_lines = load_chars(dict_path)[1:-1]               # without blank and space
+    unit = args.label_unit
+    if unit != 'codepoint':
+        # Cluster labels (EXPERIMENT_PLAN.md §1d): every dictionary character stays a class, and the
+        # clusters of the training labels are added after them, so rec_dict.txt still decodes by
+        # joining class strings (lao_line_ocr.py needs no change).
+        found = label_units.build_charset((t for _, t in read_labels(train_list)), unit, args.min_cluster_count)
+        known = set(dict_lines)
+        dict_lines += sorted(k for k in found if len(k) > 1 and k not in known)
+    chars = [''] + dict_lines + [' ']                       # PaddleOCR layout, as load_chars returns
     char_to_id = {c: i for i, c in enumerate(chars) if c}
 
-    train_set = LineList(args.data, os.path.join(args.data, 'train_list.txt'), char_to_id, args.max_w)
-    val_set = LineList(args.data, os.path.join(args.data, 'val_list.txt'), char_to_id, args.max_w)
+    train_set = LineList(args.data, train_list, char_to_id, args.max_w, unit)
+    val_set = LineList(args.data, os.path.join(args.data, 'val_list.txt'), char_to_id, args.max_w, unit)
     if not len(train_set):
         sys.exit('  ERROR: train_list.txt has no usable lines')
     if not len(val_set):
@@ -194,6 +219,11 @@ def cmd_train(args):
     model = build_model(len(chars), args.init).to(device)
     print(f'  model: {sum(p.numel() for p in model.parameters()):,} parameters, {len(chars)} classes, device {device}')
     print(f'  data: {len(train_set)} train, {len(val_set)} val lines')
+    if unit != 'codepoint':
+        n_lab = sum(len(ids) for _, _, ids in train_set.rows)
+        n_chr = sum(len(lab) for _, lab, _ in train_set.rows)
+        print(f'  label unit: {unit} ({len(chars) - len(load_chars(dict_path))} cluster classes added); '
+              f'labels per line {n_lab / len(train_set):.1f} vs characters {n_chr / len(train_set):.1f}')
 
     kw = dict(collate_fn=collate, num_workers=args.workers, pin_memory=device.type == 'cuda')
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=False, **kw)
@@ -205,7 +235,10 @@ def cmd_train(args):
     ctc = nn.CTCLoss(blank=0, zero_infinity=True)
 
     os.makedirs(args.out, exist_ok=True)
-    shutil.copy(dict_path, os.path.join(args.out, 'rec_dict.txt'))
+    with open(os.path.join(args.out, 'rec_dict.txt'), 'w', encoding='utf-8') as f:
+        f.write(''.join(c + '\n' for c in dict_lines))      # one class per line; may be a cluster
+    with open(os.path.join(args.out, 'train_args.json'), 'w', encoding='utf-8') as f:
+        json.dump({**vars(args), 'num_classes': len(chars)}, f, ensure_ascii=False, indent=2)
     best = math.inf
     model.train()
     for epoch in range(1, args.epochs + 1):
@@ -288,6 +321,12 @@ def main(argv=None):
     t.add_argument('--workers', type=int, default=4)
     t.add_argument('--device', default='', help='cuda / cpu (default: cuda if available)')
     t.add_argument('--seed', type=int, default=42)
+    t.add_argument('--label_unit', default='codepoint', choices=label_units.LABEL_UNITS,
+                   help='What one CTC class is: codepoint (default, one per character); cluster = a consonant '
+                        'with its tone mark / upper / lower vowels; cluster_am = cluster + a following ຳ; '
+                        'open = cluster, only clusters seen --min_cluster_count times (EXPERIMENT_PLAN.md §1d)')
+    t.add_argument('--min_cluster_count', type=int, default=label_units.DEFAULT_MIN_CLUSTER_COUNT,
+                   help='open: occurrences in the training labels a cluster needs to become a class (default 20)')
     e = sub.add_parser('export', help='Export best/ to rec.onnx and fetch the detector')
     for q in (t, e):
         q.add_argument('--out', required=True, help='Model dir')
