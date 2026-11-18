@@ -51,7 +51,7 @@ def cmd_export(args):
     # Read the target image height from the net_spec (e.g. [1,64,0,1 ...] → 64).
     # The dummy input MUST match the height used during training, otherwise the
     # ONNX graph traces through SumLSTM/Conv/Pool with wrong spatial dimensions.
-    target_h = 48  # Tesseract default
+    target_h = 48  # default line height
     m_spec = re.match(r'\[?\d+,(\d+),', spec)
     if m_spec:
         target_h = int(m_spec.group(1))

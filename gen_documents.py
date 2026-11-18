@@ -2,10 +2,10 @@
 """
 gen_documents.py — Synthetic Lao document pages → realistically cropped line images.
 
-Each page is laid out like a Lao official letter (see tesstrain_core/doc_synth.py),
+Each page is laid out like a Lao official letter (see laoocr_core/doc_synth.py),
 "scanned" (skew, blur, paper tint, uneven light, resolution loss, noise, specks,
 JPEG, photocopy look), then straightened and segmented by exactly the same code
-that segments real scans (tesstrain_core/doc_layout.py, used by segment_document.py).
+that segments real scans (laoocr_core/doc_layout.py, used by segment_document.py).
 
 So the synthetic line crops inherit the real pipeline's behaviour: residual skew,
 crop margins, neighbouring marks, stamp/signature overlap, bilingual lines.
@@ -37,8 +37,8 @@ import time
 import numpy as np
 
 from gen_data_from_text import image_to_lstmf, load_corpus
-from tesstrain_core.doc_layout import crop_line, deskew, draw_layout, rotate_points, segment_lines
-from tesstrain_core.doc_synth import Content, FontSet, make_letter, scan
+from laoocr_core.doc_layout import crop_line, deskew, draw_layout, rotate_points, segment_lines
+from laoocr_core.doc_synth import Content, FontSet, make_letter, scan
 
 _CFG = {}
 

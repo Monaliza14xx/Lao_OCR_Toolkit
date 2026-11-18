@@ -23,7 +23,7 @@ Usage:
 
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: tesstrain_core, tesseract_tools
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: laoocr_core, tesseract_tools
 
 import os
 import sys
@@ -485,7 +485,7 @@ def _setup_ax(ax, title, xlabel, ylabel):
 
 def render_training_plots(tess_logs, pt_logs):
     """Render the training-curve plots with TensorBoard-inspired style."""
-    from tesstrain_core.plotting import (
+    from laoocr_core.plotting import (
         apply_premium_theme, smooth_ema, add_best_annotation,
         tb_plot_series, tb_save, fill_between_smooth,
     )
@@ -1303,7 +1303,7 @@ def render_training_plots(tess_logs, pt_logs):
                         ax.plot(x_vals, y_vals, label=title_name, color=color, linewidth=2)
                         # Add best point annotation if possible
                         try:
-                            from tesstrain_core.plotting import add_best_annotation
+                            from laoocr_core.plotting import add_best_annotation
                             add_best_annotation(ax, d, color, mode='max' if 'Accuracy' in title else 'min')
                         except ImportError:
                             pass
@@ -1464,7 +1464,7 @@ def render_training_plots(tess_logs, pt_logs):
 
 def render_comparison_plots(tess_infer, pt_infer):
     """Render comparison bar charts split into 3 groups — TensorBoard style."""
-    from tesstrain_core.plotting import apply_premium_theme, tb_save
+    from laoocr_core.plotting import apply_premium_theme, tb_save
 
     def _bar_chart_tess_vs_pt(models, out_dir, tag):
         """Group 1 style: Tesseract vs PyTorch side-by-side bars."""

@@ -7,9 +7,9 @@ import numpy as np
 from PIL import Image
 from argparse import Namespace
 
-from tesstrain_core.utils import resolve_paths
-from tesstrain_core.dataset import TesseractDataset
-from tesstrain_core.model import (
+from laoocr_core.utils import resolve_paths
+from laoocr_core.dataset import LstmfDataset
+from laoocr_core.model import (
     build_model, AttentionCollapseY, MultiHeadAttentionCollapseY,
 )
 
@@ -226,7 +226,7 @@ def _make_attention_overview_image(layer, x_4d: torch.Tensor,
 
 def cmd_inspection(args: Namespace):
     print("======================================================================")
-    print("  Tesseract PyTorch Model Inspection")
+    print("  Lao OCR Model Inspection")
     print("======================================================================")
     
     p = resolve_paths(args)
@@ -278,7 +278,7 @@ def cmd_inspection(args: Namespace):
     min_length  = getattr(args, 'min_length',  3)
     seed        = getattr(args, 'seed',        None)
     
-    dataset = TesseractDataset(files)
+    dataset = LstmfDataset(files)
     valid_indices = [i for i, (_, text) in enumerate(dataset.samples) if len(text) >= min_length]
     if not valid_indices:
         print(f"  ERROR: No samples found matching min_length >= {min_length}")
@@ -289,7 +289,7 @@ def cmd_inspection(args: Namespace):
     selected_indices.sort()     # keep a stable order for nicer numbered output
     
     samples = [files[i] for i in selected_indices]
-    dataset = TesseractDataset(samples, charset=ckpt.get('charset'))   # decode with the model's own labels
+    dataset = LstmfDataset(samples, charset=ckpt.get('charset'))   # decode with the model's own labels
     print(f"  Seed:         {seed if seed is not None else 'random'}")
     print(f"  Inspecting:   {len(samples)} images")
     os.makedirs(out_base, exist_ok=True)
@@ -330,7 +330,7 @@ def cmd_inspection(args: Namespace):
         layer_dir = os.path.join(sample_dir, "00_Input")
         os.makedirs(layer_dir, exist_ok=True)
         
-        # Invert colors so text is black on white for easier viewing (assume input is white on black typical for tesseract)
+        # Invert colors so text is black on white for easier viewing (assume the input is white on black)
         img_np = x[0, 0].cpu().numpy()
         min_v, max_v = img_np.min(), img_np.max()
         if max_v > min_v:
@@ -640,7 +640,7 @@ def cmd_compare_inspection(args):
         print("  ERROR: No .lstmf files found.")
         return
 
-    dataset_all = TesseractDataset(files)
+    dataset_all = LstmfDataset(files)
     valid_idx   = [i for i, (_, txt) in enumerate(dataset_all.samples) if len(txt) >= min_len]
     rng         = random.Random(seed)
     sel         = sorted(rng.sample(valid_idx, min(num_samp, len(valid_idx))))
@@ -731,7 +731,7 @@ def cmd_compare_inspection(args):
         pair_dir = os.path.join(out_dir, fid)
         os.makedirs(pair_dir, exist_ok=True)
 
-        dataset = TesseractDataset(shared_files)
+        dataset = LstmfDataset(shared_files)
         N = len(dataset)
 
         for s in range(N):
@@ -918,10 +918,10 @@ def cmd_wer_distribution(args):
     import matplotlib.font_manager as fm
     from collections import defaultdict
 
-    from tesstrain_core.utils import resolve_paths
-    from tesstrain_core.dataset import TesseractDataset
-    from tesstrain_core.model import build_model
-    from tesstrain_core.metrics import edit_distance, normalize_lao_text
+    from laoocr_core.utils import resolve_paths
+    from laoocr_core.dataset import LstmfDataset
+    from laoocr_core.model import build_model
+    from laoocr_core.metrics import edit_distance, normalize_lao_text
 
     p = resolve_paths(args)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -970,7 +970,7 @@ def cmd_wer_distribution(args):
         m_h = _re.match(r'\[?\d+,(\d+),', ckpt.get('net_spec', ''))
         if m_h: target_h = int(m_h.group(1))
 
-        from tesstrain_core.recognize import recognize_line
+        from laoocr_core.recognize import recognize_line
 
         # ── Per-sample inference (custom images) ──────────────────────────────
         word_count_data = defaultdict(list)
@@ -1006,7 +1006,7 @@ def cmd_wer_distribution(args):
             print("  ERROR: No .lstmf files found.")
             return
 
-        dataset = TesseractDataset(files, charset=ckpt.get('charset'))   # the model's own labels
+        dataset = LstmfDataset(files, charset=ckpt.get('charset'))   # the model's own labels
         inv_charset = dataset.inv_charset if hasattr(dataset, 'inv_charset') else {}
         print(f"  Eval samples: {len(dataset)} (.lstmf files)")
 
@@ -1245,10 +1245,10 @@ def cmd_confusion_matrix(args):
     import matplotlib.font_manager as fm
     from collections import defaultdict, Counter
 
-    from tesstrain_core.utils import resolve_paths
-    from tesstrain_core.dataset import TesseractDataset
-    from tesstrain_core.model import build_model
-    from tesstrain_core.metrics import (
+    from laoocr_core.utils import resolve_paths
+    from laoocr_core.dataset import LstmfDataset
+    from laoocr_core.model import build_model
+    from laoocr_core.metrics import (
         normalize_lao_text, align_strings,
         get_component_type, LAO_COMPONENT_MAP,
     )
@@ -1297,7 +1297,7 @@ def cmd_confusion_matrix(args):
         m_h = _re.match(r'\[?\d+,(\d+),', ckpt.get('net_spec', ''))
         if m_h: target_h = int(m_h.group(1))
 
-        from tesstrain_core.recognize import recognize_line
+        from laoocr_core.recognize import recognize_line
         model.eval()
         with torch.no_grad():
             for i, (img_path, gt) in enumerate(test_pairs):
@@ -1316,7 +1316,7 @@ def cmd_confusion_matrix(args):
         if not files:
             print("  ERROR: No .lstmf files found.")
             return
-        dataset = TesseractDataset(files, charset=ckpt.get('charset'))   # the model's own labels
+        dataset = LstmfDataset(files, charset=ckpt.get('charset'))   # the model's own labels
         inv_charset = dataset.inv_charset if hasattr(dataset, 'inv_charset') else {}
         print(f"  Eval samples: {len(dataset)} (.lstmf)")
         model.eval()

@@ -79,7 +79,7 @@ webapp/ui/
 
 Pages
 1. **Settings** — paste tunnel URL + token, "Test connection" shows GPU name.
-2. **Train** — config form with presets (scratch / fine-tune / thesis E1; Tesseract transfer is deliberately left out), VGSL string field with quick validation, dataset picker, Start.
+2. **Train** — config form with presets (scratch / fine-tune / thesis E1), VGSL string field with quick validation, dataset picker, Start.
 3. **Job detail** — live chart (train/eval loss, CER, WER), CoER bars per Lao component, samples/s and GPU memory, streaming log, Stop button.
 4. **Recognize** — drag-and-drop image, model + psm + beam width, shows text with Lao font (Phetsarath / Noto Sans Lao), copy button.
 5. **Models** — table of checkpoints, evaluate, export ONNX, download.
@@ -109,7 +109,7 @@ Total ≈ 8–9 working days of effort; M0–M3 is the useful MVP.
 ## 7. Risks and open items found in the code
 
 1. **Resume is not real yet.** `TrainingLogger.__init__` opens `log.csv` with mode `'w'`, so restarting a job erases the history. `_save` stores `iteration` and optimizer state, but the loader's use of them with `--start_model` needs checking. Needed for M6: append mode (or a per-run log file) and a `--resume` flag that restores iteration, optimizer and LR scheduler.
-2. ~~**Batch padding bug**~~ — fixed on `main` (white padding + per-line widths, P0.1): predictions no longer change with batch size, so no batch-size-1 workaround or warning is needed.
+2. ~~**Batch padding bug**~~ — fixed on `main` (white padding + per-line widths): predictions no longer change with batch size, so no batch-size-1 workaround or warning is needed.
 3. **Colab limits:** idle timeout ~90 min, hard cap ~12 h on free tier, tunnel URL changes on every restart. Mitigation: all state on Drive, "reconnect" flow in Settings, `save_interval` default lowered for web runs.
 4. **Security:** public tunnel + code execution. Token required on every route, arguments whitelisted, paths confined to the Drive root, no shell strings.
 5. **Large data transfer:** don't upload gigabytes through the browser. Datasets live on Drive; synthetic generation (`gen_data_from_text.py`) can be a later job type.
@@ -127,4 +127,4 @@ Total ≈ 8–9 working days of effort; M0–M3 is the useful MVP.
 1. Datasets: is everything already on Drive, or do you want upload from the UI?
 2. Should the UI also trigger synthetic data generation and document segmentation, or only training / OCR?
 3. Is the UI for your own use only (single user, token auth is enough)?
-4. Keep `webapp/` in this repo (recommended, shares `tesstrain_core`) or a separate repo?
+4. Keep `webapp/` in this repo (recommended, shares `laoocr_core`) or a separate repo?

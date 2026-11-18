@@ -26,7 +26,7 @@ import random
 import numpy as np
 from PIL import Image
 
-from tesstrain_core.doc_layout import otsu_threshold
+from laoocr_core.doc_layout import otsu_threshold
 
 IMG = ('.png', '.jpg', '.jpeg', '.tif', '.tiff')
 

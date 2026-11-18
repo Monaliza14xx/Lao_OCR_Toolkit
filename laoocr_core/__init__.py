@@ -1,4 +1,4 @@
-# tesstrain_core package
+# laoocr_core package
 from .command_utils import cmd_unicharset, cmd_lists, cmd_proto_model, cmd_clean, cmd_plot, cmd_charset_stats
 from .training import cmd_training
 from .evaluate import cmd_evaluation

@@ -5,10 +5,10 @@ from collections import Counter
 import torch
 import numpy as np
 from PIL import Image, ImageDraw
-from tesstrain_core.model import build_model
-from tesstrain_core.recognize import recognize_line
-from tesstrain_core.metrics import TrainingLogger, edit_distance, align_strings, get_component_type, LAO_COMPONENT_MAP, compute_component_metrics
-from tesstrain_core.plotting import DashboardPlotter
+from laoocr_core.model import build_model
+from laoocr_core.recognize import recognize_line
+from laoocr_core.metrics import TrainingLogger, edit_distance, align_strings, get_component_type, LAO_COMPONENT_MAP, compute_component_metrics
+from laoocr_core.plotting import DashboardPlotter
 
 try:
     import matplotlib
@@ -77,7 +77,7 @@ def add_projection_profile_to_image(pil_img):
 
 def cmd_compare(args):
     print("======================================================================")
-    print("  Tesseract PyTorch Model Comparison")
+    print("  Lao OCR Model Comparison")
     print("======================================================================")
     
     models = list(getattr(args, 'models', []))
@@ -1305,7 +1305,7 @@ def cmd_compare(args):
             try:
                 import matplotlib.font_manager as fm
                 from matplotlib.patches import FancyBboxPatch
-                lao_font_path = 'tesstrain_core/font/phetsarath_ot.ttf'
+                lao_font_path = 'laoocr_core/font/phetsarath_ot.ttf'
                 fp_sm = fm.FontProperties(fname=lao_font_path, size=11) if os.path.exists(lao_font_path) else fm.FontProperties(family='monospace', size=11)
 
                 def _draw_alignment_grid(ax, pil_img, gt_str, pred_str, title, cat_colors):
@@ -1448,7 +1448,7 @@ def cmd_compare(args):
 
                         import matplotlib.font_manager as fm
                         from matplotlib.patches import FancyBboxPatch
-                        lao_font_path = 'tesstrain_core/font/phetsarath_ot.ttf'
+                        lao_font_path = 'laoocr_core/font/phetsarath_ot.ttf'
                         fp_sm = fm.FontProperties(fname=lao_font_path, size=11) if os.path.exists(lao_font_path) else fm.FontProperties(family='monospace', size=11)
 
                         panel_h = 4.4
@@ -1562,7 +1562,7 @@ def cmd_compare(args):
                 if not valid_models:
                     raise ValueError("No valid models for metric explanation.")
 
-                lao_font_path = 'tesstrain_core/font/phetsarath_ot.ttf'
+                lao_font_path = 'laoocr_core/font/phetsarath_ot.ttf'
                 lao_font_lg = (fm.FontProperties(fname=lao_font_path, size=16)
                                if os.path.exists(lao_font_path)
                                else fm.FontProperties(family='monospace', size=16))

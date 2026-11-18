@@ -13,7 +13,7 @@ Usage
 
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: tesstrain_core, tesseract_tools
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: laoocr_core, tesseract_tools
 
 import os
 import glob
@@ -27,8 +27,8 @@ from PIL import Image as _PILImage
 from tesseract_tools import (
     find_test_pairs,
 )
-from tesstrain_core.model import build_model
-from tesstrain_core.recognize import recognize_line
+from laoocr_core.model import build_model
+from laoocr_core.recognize import recognize_line
 
 try:
     import pytesseract

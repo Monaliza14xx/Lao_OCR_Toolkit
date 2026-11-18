@@ -18,9 +18,9 @@ def main():
 
     # 1. Load fonts
     # Find Lao font
-    lao_font_path = "tesstrain_core/font/phetsarath_ot.ttf"
+    lao_font_path = "laoocr_core/font/phetsarath_ot.ttf"
     if not os.path.exists(lao_font_path):
-        lao_font_path = "../tesstrain_core/font/phetsarath_ot.ttf"
+        lao_font_path = "../laoocr_core/font/phetsarath_ot.ttf"
     if not os.path.exists(lao_font_path):
         lao_font_path = "font/phetsarath_ot.ttf"
     if not os.path.exists(lao_font_path):

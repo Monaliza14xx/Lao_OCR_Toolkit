@@ -1,7 +1,7 @@
 [project]
 name = "lao-ocr-toolkit"
 version = "0.1.0"
-description = "GPU training, evaluation and synthetic data for Lao OCR (Tesseract-compatible VGSL models in PyTorch)"
+description = "GPU training, evaluation and synthetic data for Lao OCR (VGSL CNN-LSTM-CTC models in PyTorch)"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"

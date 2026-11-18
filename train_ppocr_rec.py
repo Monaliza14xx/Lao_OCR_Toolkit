@@ -37,8 +37,8 @@ from torch.utils.data import DataLoader, Dataset
 
 from gen_data_from_text import normalize_lao_text
 from lao_line_ocr import REC_HEIGHT, load_bgr, load_chars, pad_batch, prep_line, ctc_greedy
-from tesstrain_core import label_units
-from tesstrain_core.metrics import strict_cer_counts
+from laoocr_core import label_units
+from laoocr_core.metrics import strict_cer_counts
 
 DEFAULT_INIT = 'PaddlePaddle/PP-OCRv6_tiny_rec_safetensors'
 DEFAULT_DET = 'PaddlePaddle/PP-OCRv6_tiny_det_onnx'
@@ -130,7 +130,7 @@ def read_labels(list_file):
 
 
 class LineList(Dataset):
-    """Line images and their CTC labels. unit = what one label is (tesstrain_core/label_units.py):
+    """Line images and their CTC labels. unit = what one label is (laoocr_core/label_units.py):
     'codepoint' (one per character, as before) or a Lao cluster unit. A cluster missing from the
     dictionary is spelled as its characters; a line with a character missing from the
     dictionary is skipped."""
@@ -199,7 +199,7 @@ def cmd_train(args):
     dict_lines = load_chars(dict_path)[1:-1]               # without blank and space
     unit = args.label_unit
     if unit != 'codepoint':
-        # Cluster labels (EXPERIMENT_PLAN.md §1d): every dictionary character stays a class, and the
+        # Cluster labels (experiment E3): every dictionary character stays a class, and the
         # clusters of the training labels are added after them, so rec_dict.txt still decodes by
         # joining class strings (lao_line_ocr.py needs no change).
         found = label_units.build_charset((t for _, t in read_labels(train_list)), unit, args.min_cluster_count)
@@ -324,7 +324,7 @@ def main(argv=None):
     t.add_argument('--label_unit', default='codepoint', choices=label_units.LABEL_UNITS,
                    help='What one CTC class is: codepoint (default, one per character); cluster = a consonant '
                         'with its tone mark / upper / lower vowels; cluster_am = cluster + a following ຳ; '
-                        'open = cluster, only clusters seen --min_cluster_count times (EXPERIMENT_PLAN.md §1d)')
+                        'open = cluster, only clusters seen --min_cluster_count times')
     t.add_argument('--min_cluster_count', type=int, default=label_units.DEFAULT_MIN_CLUSTER_COUNT,
                    help='open: occurrences in the training labels a cluster needs to become a class (default 20)')
     e = sub.add_parser('export', help='Export best/ to rec.onnx and fetch the detector')

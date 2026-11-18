@@ -28,7 +28,7 @@ import os
 import re
 import sys
 
-from tesstrain_core.doc_layout import (IMAGE_EXTS, PDF_EXTS, crop_line, deskew, draft_text,
+from laoocr_core.doc_layout import (IMAGE_EXTS, PDF_EXTS, crop_line, deskew, draft_text,
                                        draw_layout, load_pages, segment_lines,
                                        tesseract_available)
 

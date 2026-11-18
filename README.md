@@ -5,11 +5,11 @@
 This toolkit covers the whole path to a Lao text-line recognizer:
 
 - **Data**: turn real scanned documents into line images, and generate synthetic Lao lines and whole synthetic documents that look like real scans.
-- **Training**: train Tesseract-style LSTM models (described by a VGSL string) on GPU with PyTorch and CTC loss, instead of Tesseract's CPU-only `lstmtraining`.
+- **Training**: train CNN + LSTM + CTC models, described by a VGSL string, on GPU with PyTorch.
 - **Evaluation**: CER, WER and Lao-specific error analysis (tone marks, vowels, consonants), plus comparisons against Tesseract models.
 - **Deployment**: export to ONNX.
 
-It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract-ocr/tesstrain), so existing tesstrain `.lstmf` data can be used as is (image + `.gt.txt` pairs are converted first). The character set is built from the training data (`charset.json`), not read from a `unicharset`. Trained models are exported to ONNX, not to Tesseract `.traineddata`, and importing Tesseract model weights is not supported.
+It trains on `.lstmf` line files (line image and text in one file); image + `.gt.txt` pairs are converted first. The character set is built from the training data (`charset.json`). Trained models are exported to ONNX.
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-red.svg)](https://pytorch.org/)
@@ -24,7 +24,7 @@ It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract
 | **GPU Training** | PyTorch training on CUDA (falls back to CPU) |
 | **PyTorch LSTM** | Standard PyTorch nn.LSTM with CTC loss |
 | **Optimizers** | Adam and SGD + Momentum supported; optional ReduceLROnPlateau |
-| **VGSL Architectures** | Tesseract VGSL strings plus PyTorch-only layers: BatchNorm, Dropout, Dense, attention height-collapse (`Atys`, `Matys`, `Hybys`), self-attention and Conformer blocks, `Lcn4` CNN stage |
+| **VGSL Architectures** | Standard VGSL strings plus extra layers: BatchNorm, Dropout, Dense, attention height-collapse (`Atys`, `Matys`, `Hybys`), self-attention and Conformer blocks, `Lcn4` CNN stage |
 | **Resume / fine-tune** | Continue from a PyTorch `.pt` checkpoint (`--start_model`) |
 | **Beam Search + dictionary** | Beam search with a word list (`--wordlist`, prefix trie), number patterns and punctuation rules |
 | **Language Model** | N-gram LM (char trigrams + word bigrams, add-k smoothing) for beam search |
@@ -56,10 +56,9 @@ It trains on the same `.lstmf` files as [tesstrain](https://github.com/tesseract
 - [🏗️ Pipeline Architecture](#️-pipeline-architecture)
 - [🔧 Advanced Features](#-advanced-features)
 - [⚡ Performance](#-performance)
-- [🆚 Comparison with Tesseract](#-comparison-with-tesseract)
 - [📊 Evaluation & Analysis Tools](#-evaluation--analysis-tools)
   - [tesseract_tools.py — Training Plots, Model Comparison & Timing](#tesseract_toolspy)
-  - [tesstrain_core/compare.py — PyTorch Model Comparison](#tesstrain_corecomparepy)
+  - [laoocr_core/compare.py — PyTorch Model Comparison](#laoocr_corecomparepy)
   - [experiments/compare_cross.py — Original vs Fine-tuned Cross-Comparison](#experimentscompare_crosspy)
 - [🐛 Troubleshooting](#-troubleshooting)
 - [📄 Command Reference](#-command-reference)
@@ -178,8 +177,8 @@ python3 gen_data_from_text.py \
 ```
 *(See the [Synthetic Data Generation](#-synthetic-data-generation) section for advanced options like multi-font, noise, and blur.)*
 
-#### Way 3: Migrate from original Tesseract training
-If you already have a `data/<model_name>-ground-truth/` folder from the original `tesstrain` Makefile, you can reuse it. If it already holds the `.lstmf` files, nothing needs to change; if it only has `.tif` + `.gt.txt` pairs, convert them as in Way 1.
+#### Way 3: Reuse existing `.lstmf` data
+If you already have a `data/<model_name>-ground-truth/` folder from an earlier training setup, you can reuse it. If it already holds the `.lstmf` files, nothing needs to change; if it only has `.tif` + `.gt.txt` pairs, convert them as in Way 1.
 
 ### Step 2: Run the full pipeline
 
@@ -456,7 +455,7 @@ python3 segment_document.py --input scans/ --output_dir data/real-lines
 
 For each document: the straightened page, a layout preview (`page1_layout.png`: green = text lines in reading order, red = emblem/stamp/signature, blue = ruled lines), one image per line, and Tesseract's draft text in `*.ocr.txt`. Correct a draft and save it as `*.gt.txt` to turn the line into real ground truth.
 
-How the segmentation works (`tesstrain_core/doc_layout.py`):
+How the segmentation works (`laoocr_core/doc_layout.py`):
 1. **Deskew** the page (projection-profile search, ±4°).
 2. **Connected components**, classified against the page's typical letter-body height: letters, marks (vowel/tone marks, dots), graphics (taller than 3 letter bodies), rules (long and thin).
 3. **Lines**: letters that overlap vertically and sit close together are chained; a wide gap starts a new line (left-aligned name vs right-aligned number on the same row).
@@ -557,7 +556,7 @@ python3 torch_train.py training --model_name lao \
 | `--lr_patience` | `5` | `plateau`: evaluations without improvement before reducing. One evaluation runs every 5 × `--debug_interval` iterations, so 5 = 2,500 iterations at the default interval |
 | `--min_lr` | `1e-5` | `plateau`: lower bound for the LR |
 | `--padding` | `white` | `white` = pad batches with the paper colour and use every line's real length (CTC, decoding, right-to-left layers). `legacy` = black padding over the full width, as before the fix; use it only to reproduce old runs (also accepted by `evaluation`) |
-| `--label_unit` | `codepoint` | What one CTC label is. `codepoint` = one per character (as before). `cluster` = a consonant with its tone mark and upper / lower vowels (and subscript ລ) is one label, e.g. `ນ້ ຳ`. `cluster_am` = as `cluster`, and a following ຳ joins it (`ນ້ຳ`). `open` = `cluster`, but only clusters seen `--min_cluster_count` times (default 20) get a label; rarer ones are spelled as characters. Every unit keeps all single characters, decodes to the same text, and is saved in the checkpoint, so `evaluation`, `compare` and `recognize` need no flag. See `tesstrain_core/label_units.py` |
+| `--label_unit` | `codepoint` | What one CTC label is. `codepoint` = one per character (as before). `cluster` = a consonant with its tone mark and upper / lower vowels (and subscript ລ) is one label, e.g. `ນ້ ຳ`. `cluster_am` = as `cluster`, and a following ຳ joins it (`ນ້ຳ`). `open` = `cluster`, but only clusters seen `--min_cluster_count` times (default 20) get a label; rarer ones are spelled as characters. Every unit keeps all single characters, decodes to the same text, and is saved in the checkpoint, so `evaluation`, `compare` and `recognize` need no flag. See `laoocr_core/label_units.py` |
 | `--data_dir` | `data` | Root data directory |
 | `--tensorboard` | `True` | Log live metrics to TensorBoard |
 | `--tensorboard_dir` | `data/.../tensorboard` | Custom TensorBoard log directory |
@@ -568,7 +567,7 @@ parameter counts, train/eval line counts, padding mode and the torch / CUDA / de
 Checkpoints also store the seed (and the scheduler state when `--lr_scheduler plateau` is used).
 
 `training.log` and the console report show **strict CER** (plain Levenshtein) and **CluER** (cluster
-error rate) next to the lenient CER; see [Step 0 experiments](#-step-0-experiments).
+error rate) next to the lenient CER; see [Evaluation](#evaluation).
 
 #### Live Tracking & Visualizations
 
@@ -825,7 +824,7 @@ Lao_OCR_Toolkit/
 ├── log_to_tensorboard.py       # Export Tesseract training logs to TensorBoard
 ├── run.sh                      # Shortcut launcher (plots, compare, benchmark, …)
 ├── fonts/                      # Lao (Phetsarath, Saysettha) and Latin fonts for synthetic data
-├── tesstrain_core/
+├── laoocr_core/
 │   ├── model.py                # VGSL spec → VGSLNet, an nn.Sequential (incl. attention/Conformer/Lcn4 layers)
 │   ├── training.py             # GPU training loop (CTC loss, checkpoints, TensorBoard)
 │   ├── report.py               # Console progress report printed during training
@@ -839,10 +838,9 @@ Lao_OCR_Toolkit/
 │   ├── compare.py, inspection.py, projection.py, plotting.py   # Analysis & figures
 │   └── command_utils.py, utils.py
 ├── experiments/                # Research scripts: benchmarks, cross-comparisons, corpus
-│   ├── EXPERIMENT_PLAN.md      # PhD experiment plan (Step 0 part swaps and later phases)
 │   ├── step0_specs.py          # Step 0 net_specs, parameter table, training commands
 │   └── …                       # enrichment, paper figures (see experiments/README.md)
-├── .github/workflows/ci.yml    # Lint + tests on every push / pull request
+├── .github/workflows/ci.yml    # Lint on every push / pull request
 ├── LSTM_WEIGHTS.md             # Why PyTorch LSTMs have slightly more parameters than Tesseract's
 ├── metrics.md                  # How CER / WER / CoER are computed
 ├── pyproject.toml              # Project metadata, pytest and ruff settings
@@ -899,7 +897,7 @@ flowchart LR
         SEG --> FIX["Correct the draft text<br/>.ocr.txt → .gt.txt"]
         C["Lao text corpus"] --> GL["gen_data_from_text.py<br/>single rendered lines"]
         C --> GD["gen_documents.py<br/>synthetic letter pages + scan simulation"]
-        GD --> SEG2["same segmentation as real scans<br/>(tesstrain_core/doc_layout.py)"]
+        GD --> SEG2["same segmentation as real scans<br/>(laoocr_core/doc_layout.py)"]
         FIX --> GT[("line images<br/>+ .gt.txt + .lstmf")]
         GL --> GT
         SEG2 --> GT
@@ -969,7 +967,7 @@ The model is built from the VGSL string (CNN layers → height collapse → LSTM
 | `torch_train.py export` | Writes `<model>.onnx` + `<model>_model_info.json` (charset, input height) for ONNX Runtime |
 | `torch_train.py recognize` | Reads one image: splits a page into lines (`--psm 3` columns + lines, `--psm 6` lines, `--psm 7` single line), runs the model, decodes with greedy CTC or beam search (+ word list DAWG, + n-gram language model) |
 
-> `recognize` still splits pages with a simple projection-profile method. The Lao-aware segmenter in `tesstrain_core/doc_layout.py` (marks kept whole, stamps and signatures excluded) is currently used for preparing training data only.
+> `recognize` still splits pages with a simple projection-profile method. The Lao-aware segmenter in `laoocr_core/doc_layout.py` (marks kept whole, stamps and signatures excluded) is currently used for preparing training data only.
 
 ---
 
@@ -1057,7 +1055,7 @@ Layer breakdown:
 #### Example Architectures
 
 ```bash
-# Default (same layout as Tesseract's standard Lao model)
+# Default
 --net_spec "[1,48,0,1 Ct3,3,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]"
 
 # With BN + Dropout (regularized)
@@ -1074,15 +1072,15 @@ Layer breakdown:
 fuse them into one 3×3 conv; the outputs are the same in eval mode:
 
 ```python
-from tesstrain_core.model import build_model, reparameterize_model
+from laoocr_core.model import build_model, reparameterize_model
 model = build_model(spec, num_classes); model.load_state_dict(ckpt['model_state_dict'])
 reparameterize_model(model.eval())        # or model.reparameterize()
 ```
 
-> **⚠️ Tesseract compatibility:** The standard tokens (`C`, `Mp`, `L…`, `O`) use Tesseract's VGSL
-> syntax, but models are PyTorch only: weights cannot be imported from a Tesseract `.traineddata`, and
-> there is no export back to one (ONNX only). `Bn`, `D`, `Fc`, `Cp`, `Mpa`, the attention and Conformer
-> layers, `Lbpx` and `Lcn4` are PyTorch-only extensions.
+> **⚠️ Model format:** The standard tokens (`C`, `Mp`, `L…`, `O`) follow the VGSL syntax, but models
+> are PyTorch only: weights cannot be imported from a `.traineddata` file, and there is no export to one
+> (ONNX only). `Bn`, `D`, `Fc`, `Cp`, `Mpa`, the attention and Conformer layers, `Lbpx` and `Lcn4` are
+> extensions beyond standard VGSL.
 
 ---
 
@@ -1091,20 +1089,6 @@ reparameterize_model(model.eval())        # or model.reparameterize()
 The repository has no measured speed or memory benchmark, so none is quoted here. Every report the
 trainer prints shows the real throughput (`lines/s`) and GPU memory (current and peak) for your GPU,
 batch size and `net_spec`; `training.log` keeps `samples_per_sec` and `gpu_mem_gb` per report.
-
----
-
-## 🆚 Comparison with Tesseract
-
-| Feature | Tesseract | This toolkit |
-|---------|-----------|---------------|
-| Training backend | C++ CPU | **PyTorch GPU** |
-| Optimizer | Adam or momentum SGD (`--net_mode`; tesstrain's default 192 uses Adam) | Adam / SGD + momentum |
-| Model export | `.traineddata` | `.onnx` (no `.traineddata` import or export) |
-| Beam search | ✅ + word / number / punctuation DAWGs | ✅ + word list + number / punctuation rules + LM |
-| Page segmentation | 14 modes | 4 modes (3, 6, 7, 13) |
-| Language model | Dictionary DAWGs, no n-gram | Char + word n-gram (`--lm_corpus`) |
-| Synthetic data | `text2image` (C++) | `gen_data_from_text.py` |
 
 ---
 
@@ -1161,7 +1145,7 @@ pip install onnx>=1.14.0 onnxruntime>=1.15.0
 
 Three tools handle post-training evaluation and model comparison.
 `tesseract_tools.py` and `experiments/compare_cross.py` are standalone scripts;
-`tesstrain_core/compare.py` runs through `torch_train.py compare`.
+`laoocr_core/compare.py` runs through `torch_train.py compare`.
 
 ---
 
@@ -1247,9 +1231,9 @@ TESS_CONFIG         = "--psm 7 --oem 1"
 
 ---
 
-### `tesstrain_core/compare.py`
+### `laoocr_core/compare.py`
 
-**PyTorch model comparison pipeline** — runs inside the `tesstrain_core`
+**PyTorch model comparison pipeline** — runs inside the `laoocr_core`
 package and is invoked via `torch_train.py compare`.
 
 ```bash
@@ -1338,16 +1322,10 @@ pip install pytesseract pillow matplotlib numpy
 
 ## 🔬 Step 0 experiments
 
-Step 0 of the PhD plan ([`experiments/EXPERIMENT_PLAN.md`](experiments/EXPERIMENT_PLAN.md)) swaps
-one module of the thesis model B0 = `I64K5C16` at a time: the height collapse ("squash"), the
-sequence model, the CNN, and the CTC time resolution (x-stride). The toolkit pieces it needs:
-
-| Plan item | What | Where |
-|---|---|---|
-| P0.1 | White padding + real per-line lengths; batch size 1 and 64 give the same predictions | `--padding` (default `white`) |
-| P0.2 | Strict CER and CluER next to the lenient CER | `evaluation`, `training.log`, `tesstrain_core/metrics.py` |
-| P0.4 | `--seed`; git commit, seed, resolved spec and all args in `config.json`; optional `ReduceLROnPlateau` | `--seed`, `--lr_scheduler plateau` |
-| — | Modern CNN backbone token | `Lcn4` (see [VGSL](#network-architecture-vgsl)) |
+`experiments/step0_specs.py` lists `--net_spec` configurations that each change one part of the
+thesis model B0 = `I64K5C16`: the height collapse ("squash"), the sequence model, the CNN (including
+the `Res18` and `Lcn4` backbones) or the CTC time resolution (x-stride). Every spec is built before
+anything is printed, so a spec that does not build fails here, not hours into a training run.
 
 List the configurations, with parameter counts (80 classes), rows reaching the collapse and CTC
 frames for a 512 px line:
@@ -1356,18 +1334,6 @@ frames for a 512 px line:
 python3 experiments/step0_specs.py
 ```
 
-| Name | Change vs B0 | Params |
-|---|---|---|
-| `B0` | `[1,64,0,1 Ct5,5,16 Mp3,3 Lfys64 Lfx96 Lrx96 Lfx384 O1c###]` | 929,264 |
-| `S-flatten` / `S-Atys64` / `S-Matys64` / `S-Hybys64` | collapse: none / additive attention / 4-head attention / BiLSTM + attention | 1,012,720 / 911,600 / 914,672 / 933,744 |
-| `R-none` / `R-fwd` / `R-BiLSTM` | sequence model: none / `Lfx384` / `Lbx96 Lbx384` | 26,608 / 743,408 / 1,982,960 |
-| `C-K3` / `C-2conv` / `C-Lcn4` | CNN: `Ct3,3,16` / `+ Ct5,5,32` after the pool / `Lcn4` backbone | 929,008 / 946,192 / 1,020,808 |
-| `X-sx1` / `X-sx2` | pool x-stride 1 (T = W) / 2 (T ≈ W/2) with `Mpa` | 929,264 / 929,264 |
-| `E2-H4` / `E2-plain` | E2 controls: B0's CNN with only 4 rows reaching the collapse / plain 5-conv + BN CNN (~0.69M CNN params) | 929,264 / 1,667,824 |
-| `E2-R16` / `E2-R32` / `E2-R64` | E2: ResNet18 (`Res18,W`), T = W/3, 4 rows | 1,657,408 / 3,784,752 / 12,223,504 |
-| `E2-LS` / `E2-LT` | E2: LCNetV4-style small / tiny tier from `Lcn4` stages, T = W/3 (171 frames at 512 px) | 4,874,072 / 1,719,028 |
-| `E2-R16-sx2` / `E2-R16-sx4` / `E2-LS-sx4` | E2 sensitivity: native time resolution (T = W/2, W/4) | 1,657,408 / 1,657,456 / 4,874,072 |
-
 Print the training commands (seeds 1, 2, 3 by default) and add your data paths:
 
 ```bash
@@ -1375,10 +1341,10 @@ python3 experiments/step0_specs.py --commands --extra "--ground_truth_dir data/l
 python3 experiments/step0_specs.py --commands --only B0 squash --seeds 1 2 3 4 5
 ```
 
-The shared recipe is `--batch_size 64 --learning_rate 0.002 --max_iterations 50000 --lr_scheduler plateau`
-(change it with `--train_args`). The thesis' scheduler settings are not known yet (plan §1b, item 2),
-so `--lr_factor` / `--lr_patience` / `--min_lr` keep the defaults above until they are recovered.
-For the faithful thesis replication (E1a), add `--padding legacy`.
+`--only` takes configuration names or groups (`squash`, `rnn`, `cnn`, `xstride`, `backbone`,
+`backbone-native`). The shared recipe is
+`--batch_size 64 --learning_rate 0.002 --max_iterations 50000 --lr_scheduler plateau`; change it
+with `--train_args`, and append flags to every command with `--extra` (for example `--padding legacy`).
 
 ---
 
@@ -1387,10 +1353,10 @@ For the faithful thesis replication (E1a), add `--padding legacy`.
 These are known issues in the current code. Keep them in mind when you read or report results.
 
 1. **Runs made before the padding fix are not comparable.** Older versions padded batches with black and gave CTC the full padded width, so models with right-to-left (`Lrx`, `Lbx`) or attention layers changed their predictions with the batch (296 of 400 lines in one test). The current code pads with white and passes every line's width to the model and to CTC, so batch size 1 and 64 give the same predictions. `--padding legacy` reproduces the old behaviour. In training mode, BatchNorm statistics still include the padding.
-2. **CER/WER are lenient by default.** Strict CER and CluER are now reported next to it (see [Evaluation](#evaluation)). `tesstrain_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
+2. **CER/WER are lenient by default.** Strict CER and CluER are now reported next to it (see [Evaluation](#evaluation)). `laoocr_core/metrics.py` normalizes both strings before scoring (NFC, removes zero-width characters, maps Thai lookalike vowels to Lao, strips trailing `.`/`,`/spaces) and counts visually similar Lao pairs (ດ/ຕ, ນ/ມ, ບ/ປ, ກ/ຖ, ຜ/ຝ, ພ/ຟ, ໃ/ໄ) as half an error. `tesseract_tools.py` uses plain Levenshtein distance. Compare numbers only when they come from the same scoring function. WER splits on spaces, which written Lao mostly doesn't use between words.
 3. **Beam search merges double letters.** The beam decoder (`recognize --beam_width > 1`) doesn't track whether a blank separated two identical characters, so `100` can come out as `10`. Greedy decoding is not affected; `evaluation` and `compare` always decode greedily.
 4. **No learning-rate schedule by default.** The learning rate stays constant unless you pass `--lr_scheduler plateau`.
-5. **Importing Tesseract weights is not supported.** There is no option to start from a Tesseract `.traineddata` / `.lstm` model; train from scratch or continue from a PyTorch checkpoint (`--start_model`). Tesseract models are only used for comparison (`tesseract_tools.py compare`, `experiments/compare_cross.py`, which run the `tesseract` binary).
+5. **Importing `.traineddata` weights is not supported.** There is no option to start from a `.traineddata` / `.lstm` model; train from scratch or continue from a PyTorch checkpoint (`--start_model`). `.traineddata` models are only used for comparison (`tesseract_tools.py compare`, `experiments/compare_cross.py`, which run the `tesseract` binary).
 6. **Early stopping can use training CER.** On logging steps where validation doesn't run, `--target_error_rate` is checked against the current training batch's CER.
 
 ---
@@ -1416,4 +1382,4 @@ Research scripts that reproduce the original experiments live in
 
 ## 📜 License
 
-Code: Apache 2.0 — Same as [Tesseract](https://github.com/tesseract-ocr/tesseract) and [tesstrain](https://github.com/tesseract-ocr/tesstrain).
+Code: Apache 2.0.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Step 0 part-swap configurations (EXPERIMENT_PLAN.md §2, §4): one module of B0 changed at a time.
+"""Step 0 part-swap configurations: one module of B0 changed at a time.
 
 Run from the repository root:
 
@@ -8,7 +8,7 @@ Run from the repository root:
   python experiments/step0_specs.py --commands --only B0 S-Atys --seeds 1 2 3 4 5 \\
       --extra "--ground_truth_dir data/lao-ground-truth --output_root data/step0"
 
-Every spec is built with tesstrain_core.model.build_model before anything is printed, so a
+Every spec is built with laoocr_core.model.build_model before anything is printed, so a
 spec that doesn't build fails here, not 3 hours into a Colab run.
 """
 import argparse
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch  # noqa: E402
 
-from tesstrain_core.model import build_model, output_lengths  # noqa: E402
+from laoocr_core.model import build_model, output_lengths  # noqa: E402
 
 NUM_CLASSES = 80          # 79 characters + CTC blank, as in the thesis data
 HEAD = '1,64,0,1'          # thesis input: grayscale, height 64, variable width
@@ -50,7 +50,7 @@ CONFIGS = [
     ('C-2conv',   'cnn', spec(cnn='Ct5,5,16 Mp3,3 Ct5,5,32'), 'second conv after the pool'),
     ('C-Lcn4',    'cnn', spec(cnn='Lcn4,24,1 Mp3,3 Lcn4,48,2 Lcn4,64,1,2,1'),
      'LCNetV4-style backbone, ~1M params total'),
-    # E2 (EXPERIMENT_PLAN.md §1c): ResNet18 / LCNetV4-style backbones. Everything after the CNN is B0's.
+    # E2: ResNet18 / LCNetV4-style backbones. Everything after the CNN is B0's.
     # Time resolution kept at T = W/3 (Lcn4 stems pad by 1: 171 instead of 170 frames at W=512);
     # 64 px lines reach the collapse with 4 rows (64 / 16) instead of B0's 21.
     ('E2-H4',     'backbone', spec(cnn='Ct5,5,16 Mp3,3 Mpa5,1,5,1,0,0'),

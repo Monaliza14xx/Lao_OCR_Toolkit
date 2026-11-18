@@ -86,7 +86,7 @@ def levenshtein(a, b):
 
 
 def strict_cer_counts(pred, gt):
-    """(errors, GT characters) for strict CER: plain Levenshtein on the raw strings (P0.2)."""
+    """(errors, GT characters) for strict CER: plain Levenshtein on the raw strings."""
     return levenshtein(pred, gt), len(gt)
 
 
@@ -233,7 +233,7 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
                     use_real_lengths=True, details=None):
     """CER / WER / line accuracy / CoER of a model over (part of) a loader.
 
-    use_real_lengths: decode only the frames that belong to each line (P0.1), so a line's
+    use_real_lengths: decode only the frames that belong to each line, so a line's
     prediction doesn't depend on the padding added for wider lines in its batch.
     False reproduces the old behaviour (decode the whole padded width).
     details: optional dict, filled with 'cer_strict' (plain Levenshtein, no normalisation),
@@ -274,7 +274,7 @@ def compute_metrics(model, loader, dataset, device, max_batches=50, collect_samp
                 total_char_dist += edit_distance(pred_s, gt_s)
                 total_chars += max(len(gt_s), 1)
                 
-                # Strict CER and CluER (P0.2)
+                # Strict CER and CluER
                 e, n = strict_cer_counts(pred_s, gt_s)
                 strict_err += e; strict_n += max(n, 1)
                 e, n = cluster_error_counts(pred_s, gt_s)

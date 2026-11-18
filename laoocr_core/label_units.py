@@ -1,6 +1,6 @@
 """CTC label units: one label per code point (default) or per Lao grapheme cluster.
 
-EXPERIMENT_PLAN.md §1d (E3). Lao stacks tone marks, upper / lower vowels and subscript ລ on
+Experiment E3. Lao stacks tone marks, upper / lower vowels and subscript ລ on
 a consonant. With code-point labels CTC has to emit 2–3 labels for one glyph column, in a fixed
 order. With cluster labels the whole stack is one class, the idea of AksonOCR-Lite's Thai
 recogniser (github.com/Remtir/AksonOCR-Lite).

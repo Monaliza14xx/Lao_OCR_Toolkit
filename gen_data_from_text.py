@@ -1310,8 +1310,8 @@ Examples:
         import glob
         script_dir = os.path.dirname(os.path.abspath(__file__))
         default_tnr = [
-            os.path.join(script_dir, 'tesstrain_core/font/TimesNewRoman.ttf'),
-            'tesstrain_core/font/TimesNewRoman.ttf',
+            os.path.join(script_dir, 'laoocr_core/font/TimesNewRoman.ttf'),
+            'laoocr_core/font/TimesNewRoman.ttf',
             '/System/Library/Fonts/Supplemental/Times New Roman.ttf',
             '/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf',
             '/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf'

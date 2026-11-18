@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 from . import label_units
 
 class LstmfReader:
-    """Reads Tesseract .lstmf binary files."""
+    """Reads .lstmf line files (line image + ground-truth text)."""
 
     def __init__(self, data: bytes):
         self.data = data
@@ -76,10 +76,10 @@ def load_lstmf(filepath):
     with open(filepath, 'rb') as f:
         return LstmfReader(f.read()).read_document()
 
-class TesseractDataset(Dataset):
+class LstmfDataset(Dataset):
     """Line images + labels from .lstmf files.
 
-    label_unit: what one CTC label is (see tesstrain_core/label_units.py): 'codepoint' (default,
+    label_unit: what one CTC label is (see laoocr_core/label_units.py): 'codepoint' (default,
     as before), 'cluster', 'cluster_am' or 'open' (with min_cluster_count). With a given charset
     (eval sets, checkpoints) the unit is read from the charset when not passed.
     """
@@ -154,7 +154,7 @@ class TesseractDataset(Dataset):
 
 # Images are scaled so white paper = +1 and black ink = -1 (see __getitem__).
 PAD_WHITE = 1.0
-PAD_BLACK = -1.0   # the value used before the P0.1 fix; kept for --padding legacy
+PAD_BLACK = -1.0   # the value used before the padding fix; kept for --padding legacy
 
 
 class PadCollate:

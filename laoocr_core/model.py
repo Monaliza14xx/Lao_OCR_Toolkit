@@ -617,7 +617,7 @@ class VGSLNet(nn.Sequential):
     """nn.Sequential that can also take the real width of every line in the batch.
 
     ``model(x)`` behaves exactly like nn.Sequential (old behaviour, ONNX export, single images).
-    ``model(x, widths)`` makes each line's output independent of the padding (P0.1):
+    ``model(x, widths)`` makes each line's output independent of the padding:
     convolutions and pools see the same zeros / -inf past the line end as at batch size 1,
     right-to-left and bidirectional LSTMs start at the line's own end, attention ignores
     padded frames. State-dict keys are the same as a plain nn.Sequential.

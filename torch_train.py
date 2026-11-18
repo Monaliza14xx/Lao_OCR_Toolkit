@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 
-from tesstrain_core import (
+from laoocr_core import (
     cmd_unicharset,
     cmd_lists,
     cmd_proto_model,
@@ -12,10 +12,10 @@ from tesstrain_core import (
     cmd_clean,
     cmd_charset_stats
 )
-from tesstrain_core.inspection import cmd_inspection, cmd_compare_inspection, cmd_wer_distribution, cmd_confusion_matrix
-from tesstrain_core.compare import cmd_compare
-from tesstrain_core.projection import cmd_projection
-from tesstrain_core.export import cmd_export
+from laoocr_core.inspection import cmd_inspection, cmd_compare_inspection, cmd_wer_distribution, cmd_confusion_matrix
+from laoocr_core.compare import cmd_compare
+from laoocr_core.projection import cmd_projection
+from laoocr_core.export import cmd_export
 
 
 def add_common_args(parser):
@@ -46,9 +46,9 @@ def main():
         prog='torch_train.py',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
-            'Tesseract PyTorch GPU Training Pipeline\n'
+            'Lao OCR GPU Training Pipeline\n'
             '----------------------------------------\n'
-            'Train, evaluate, and export Tesseract LSTM models on GPU.\n'
+            'Train, evaluate, and export VGSL CNN-LSTM-CTC models on GPU.\n'
             'Choose one of the subcommands below to run a pipeline step.\n'
         ),
         epilog="""\
@@ -103,7 +103,7 @@ Get help for a subcommand:
     # training
     p = sub.add_parser('training', help='Train the LSTM model on GPU',
                        formatter_class=argparse.RawDescriptionHelpFormatter,
-                       description='Train the Tesseract LSTM model on GPU.\n'
+                       description='Train a VGSL CNN-LSTM-CTC model on GPU.\n'
                                    'Use --epochs for epoch-based stopping, or --max_iterations for step-based.',
                        epilog="""\
 --------------------------------------------------------
@@ -166,7 +166,7 @@ Get help for a subcommand:
                    help='What one CTC label is: codepoint (default, as before); cluster = a consonant '
                         'with its tone mark / upper / lower vowels; cluster_am = cluster, and a '
                         'following ຳ joins it; open = cluster, but only clusters seen at least '
-                        '--min_cluster_count times get their own label (EXPERIMENT_PLAN.md §1d)')
+                        '--min_cluster_count times get their own label')
     g.add_argument('--min_cluster_count', type=int, default=20, metavar='N',
                    help='open: a cluster needs N occurrences in the training text to become a label '
                         '(default: 20)')

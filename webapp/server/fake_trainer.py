@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from tesstrain_core.lao_classes import LAO_COMPONENT_MAP  # noqa: E402
+from laoocr_core.lao_classes import LAO_COMPONENT_MAP  # noqa: E402
 
 HEADER = (['iteration', 'timestamp', 'epoch', 'train_loss', 'eval_loss', 'train_cer', 'train_wer', 'train_acc',
            'eval_cer', 'eval_wer', 'eval_acc', 'mean_rms', 'learning_rate', 'gpu_mem_gb', 'samples_per_sec',

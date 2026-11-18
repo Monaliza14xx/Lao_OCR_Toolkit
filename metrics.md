@@ -1,6 +1,6 @@
-# Evaluation Metrics in Tesstrain-GPU
+# Evaluation Metrics in the Lao OCR Toolkit
 
-This document explains the core metrics used to evaluate OCR model performance within the `tesstrain-gpu` framework. All calculations are handled in `tesstrain_core/metrics.py`.
+This document explains the core metrics used to evaluate OCR model performance within the `tesstrain-gpu` framework. All calculations are handled in `laoocr_core/metrics.py`.
 
 ## Core Mechanism: String Alignment
 Before calculating any error rates, the system aligns the **Predicted String** with the **Ground Truth String** using the Levenshtein distance dynamic programming algorithm.
@@ -49,7 +49,7 @@ $$CoER_c = \frac{S_c + D_c + I_c}{N_c}$$
 >
 > The Tesseract-side scripts (`tesseract_tools.py`, `compare_cross.py`) count only substitutions and deletions ($I_c$ is not added), so their CoER is never above 100% and is not directly comparable with the PyTorch-side numbers.
 
-**Character classes** follow the 5 tiers Lao stacks in (defined once in `tesstrain_core/lao_classes.py`, used by every script):
+**Character classes** follow the 5 tiers Lao stacks in (defined once in `laoocr_core/lao_classes.py`, used by every script):
 
 | Tier | Class | Characters |
 |------|-------|-----------|

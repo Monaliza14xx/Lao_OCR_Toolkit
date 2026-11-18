@@ -5,7 +5,7 @@ import re
 import torch
 from torch.utils.data import DataLoader
 from .utils import resolve_paths
-from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
+from .dataset import LstmfDataset, collate_fn, legacy_collate_fn
 from .model import build_model
 from .metrics import (compute_metrics, edit_distance, align_strings, compute_component_metrics, LAO_COMPONENT_MAP,
                       strict_cer_counts, cluster_error_counts)
@@ -92,7 +92,7 @@ def cmd_evaluation(args):
     if m: target_h = int(m.group(1))
 
     legacy_pad = getattr(args, 'padding', 'white') == 'legacy'
-    eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=ckpt['charset'],
+    eval_ds = LstmfDataset(eval_files, target_height=target_h, charset=ckpt['charset'],
                                label_unit=ckpt.get('label_unit'))
     eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
                               num_workers=args.num_workers, collate_fn=legacy_collate_fn if legacy_pad else collate_fn)

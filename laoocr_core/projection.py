@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 from matplotlib.patches import FancyBboxPatch
 
-from tesstrain_core.model import build_model
-from tesstrain_core.recognize import recognize_line
-from tesstrain_core.metrics import align_strings
+from laoocr_core.model import build_model
+from laoocr_core.recognize import recognize_line
+from laoocr_core.metrics import align_strings
 
 def add_projection_profile_to_image(pil_img):
     """Augment image by adding its vertical projection profile underneath it."""
@@ -65,7 +65,7 @@ def add_projection_profile_to_image(pil_img):
 
 def cmd_projection(args):
     print("======================================================================")
-    print("  Tesseract PyTorch Model Projection Analysis")
+    print("  Lao OCR Model Projection Analysis")
     print("======================================================================")
 
     models = list(getattr(args, 'models', []))
@@ -82,7 +82,7 @@ def cmd_projection(args):
     min_length = getattr(args, 'min_length', 40)
 
     # Load fonts for matplotlib CJK/Lao characters
-    lao_font_path = 'tesstrain_core/font/phetsarath_ot.ttf'
+    lao_font_path = 'laoocr_core/font/phetsarath_ot.ttf'
     fp_sm = fm.FontProperties(fname=lao_font_path, size=11) if os.path.exists(lao_font_path) else fm.FontProperties(family='monospace', size=11)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

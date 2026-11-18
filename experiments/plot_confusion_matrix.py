@@ -1,7 +1,7 @@
 
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: tesstrain_core, tesseract_tools
+_sys.path.insert(0, str(_Path(__file__).resolve().parents[1]))  # repo root: laoocr_core, tesseract_tools
 import os
 import csv
 import argparse

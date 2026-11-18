@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from .utils import resolve_paths, set_seed, git_info
-from .dataset import TesseractDataset, collate_fn, legacy_collate_fn
+from .dataset import LstmfDataset, collate_fn, legacy_collate_fn
 from .label_units import DEFAULT_MIN_CLUSTER_COUNT, infer_unit
 from .model import build_model, output_lengths
 from .metrics import compute_metrics, compute_mean_rms, TrainingLogger
@@ -64,7 +64,7 @@ def cmd_training(args):
         sys.exit(1)
 
     print(f"\n{'=' * 70}")
-    print("  Tesseract PyTorch GPU Trainer")
+    print("  Lao OCR GPU Trainer")
     print(f"{'=' * 70}")
     print(f"  Device:          {device}" +
           (f" ({torch.cuda.get_device_name(0)})" if device.type == 'cuda' else ""))
@@ -108,8 +108,8 @@ def cmd_training(args):
             charset = json.load(f)
         print(f"  Loaded charset from {charset_path}")
 
-    # P0.1: white padding + real per-line lengths. --padding legacy = black padding and the
-    # full padded width for CTC / decoding, as in runs made before the fix (E1a faithful arm).
+    # White padding + real per-line lengths. --padding legacy = black padding and the
+    # full padded width for CTC / decoding, as in runs made before the fix.
     legacy_pad = getattr(args, 'padding', 'white') == 'legacy'
     collate = legacy_collate_fn if legacy_pad else collate_fn
     if legacy_pad:
@@ -122,12 +122,12 @@ def cmd_training(args):
             print(f"Error: {charset_path} holds a '{found}' charset but --label_unit is '{label_unit}'. "
                   "Use another --output_dir or delete charset.json.")
             sys.exit(1)
-    train_ds = TesseractDataset(train_files, target_height=target_h, charset=charset,
+    train_ds = LstmfDataset(train_files, target_height=target_h, charset=charset,
                                 label_unit=label_unit,
                                 min_cluster_count=getattr(args, 'min_cluster_count', DEFAULT_MIN_CLUSTER_COUNT))
     eval_loader = None
     if eval_files:
-        eval_ds = TesseractDataset(eval_files, target_height=target_h, charset=train_ds.charset,
+        eval_ds = LstmfDataset(eval_files, target_height=target_h, charset=train_ds.charset,
                                    label_unit=train_ds.label_unit)
         eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False,
                                   num_workers=args.num_workers, collate_fn=collate,
@@ -221,7 +221,7 @@ def cmd_training(args):
         except ImportError:
             print("  TensorBoard not available (pip install tensorboard to enable)")
 
-    # Everything needed to say exactly what this run was (P0.4)
+    # Everything needed to say exactly what this run was
     config = dict(vars(args))
     config['run'] = {
         'git': git_info(),

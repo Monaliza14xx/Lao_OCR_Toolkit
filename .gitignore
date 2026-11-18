@@ -55,7 +55,7 @@ tesseract_data/
 scratch_*.py
 
 # Proprietary fonts (not redistributable) — supply your own via --sec_font
-tesstrain_core/font/TimesNewRoman*.ttf
+laoocr_core/font/TimesNewRoman*.ttf
 
 # Thesis write-up (kept local, not published)
 THESIS_REPORT.md
@@ -63,5 +63,6 @@ THESIS_REPORT.md
 # Tests (kept local, not published)
 tests/
 
-# PhD experiment plan (kept local, not published)
+# PhD experiment plans and protocols (kept local, not published)
 experiments/EXPERIMENT_PLAN.md
+experiments/TRAINING_MANUAL.md

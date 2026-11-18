@@ -127,7 +127,7 @@ PALETTE = [                # line / bar colours (one per model)
     "#2e7d32",             # green variant
 ]
 
-# Premium Theme Alignment (matching tesstrain_core/plotting.py)
+# Premium Theme Alignment (matching laoocr_core/plotting.py)
 C_TRAIN      = '#90CAF9'    # Light blue
 C_EVAL       = '#FF8A65'    # Orange
 C_SMOOTH     = '#1565C0'    # Blue (smoothed train)
@@ -801,7 +801,7 @@ def run_plots(data_dir="data", out_dir=PLOTS_DIR):
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Lao character classes: shared with the PyTorch side so CoER means the same everywhere
-from tesstrain_core.lao_classes import LAO_COMPONENT_MAP, get_component_type, fold_sara_am  # noqa: E402
+from laoocr_core.lao_classes import LAO_COMPONENT_MAP, get_component_type, fold_sara_am  # noqa: E402
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -879,8 +879,8 @@ except ImportError:
 # ── PyTorch Imports ──────────────────────────────────────────────────────────
 try:
     import torch
-    from tesstrain_core.model import build_model
-    from tesstrain_core.recognize import recognize_line
+    from laoocr_core.model import build_model
+    from laoocr_core.recognize import recognize_line
     HAS_PYTORCH = True
 except ImportError:
     HAS_PYTORCH = False
